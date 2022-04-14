@@ -3,10 +3,10 @@
 Driver for SD host controller on Kolibri OS
 
 Version controller:
-*1.0 - no supported
-*2.0 - no supported 
-*3.0 - no supported
-*4.0 - no supported
+- 1.0 - no supported
+- 2.0 - no supported 
+- 3.0 - no supported
+- 4.0 - no supported
 
 Version OS: 
 * rev 9764
