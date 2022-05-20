@@ -104,7 +104,6 @@ SDHC_RESP7_6    = 0x1C
 ;0x20-0x23 - Buffer Data Port  как я понимаю это указатель на буфер
 ; Доступ к буферу контроллера можно получить через 32bit Data Port регистр(смю Раздел 1.7)
 SDHC_BUFFER     = 0x20
-  buffer_data_port = 0x20 ;dword
 
 ;0x24-0x2f - Host Control 1 and Others
   ; Present Satte Register (offset 0x24)
@@ -118,14 +117,17 @@ SDHC_BUFFER     = 0x20
   ; 10 - Buffer Write Enable
   ; 11 - Buffer Read Enable
   ; 12-15 - Reserved
+  ;      Этот бит показывает вставлена карта или нет в слот. В нормальных условиях контроллер генерит
+  ;    прерывание Card Inesrtion и Card Removed. Ресет всего не должен влиять на это.
   ; 16 - Card Inserted
   ; 17 - Card State Stable
   ; 18 - Card Detect Pin Level
+
   ; 19 - Write Protect Switch Pin Level
   ; 20-23 - DAT[0:3] Line Signal Level
   ; 24 - CMD Line Signal Level
   ; 25-31 - Reserved
-SDHC_PRSNT_STATE= 0x24  ;word (12-15 , 26 Rsvd)
+SDHC_PRSNT_STATE = 0x24  ;word (12-15 , 26 Rsvd)
 
   ; Host control Register (offset 0x28)
   ; 0 - LED Control  (0 - LED off; 1 - LED on)
@@ -512,7 +514,21 @@ struct  SDHCI_CONTROLLER
 
         irq_line        rd 1 ;rb
         Capabilities    rd 2 ; qword - save Capabilities
+        max_slot_amper  rd 2
+
+        divider400KHz   rd 1 ; for SDCLK frequency Select
+        divider25MHz    rd 1
+        divider50MHz    rd 1
 ends
+
+struct  SDHCI_SLOT
+        reg_map         rd 1; pointer to register map
+        Capabilities    rd 2 ; qword - save Capabilities
+        divider400KHz   rd 1 ; for SDCLK frequency Select
+        divider25MHz    rd 1
+        divider50MHz    rd 1
+        max_slot_amper  rd 2
+ends;
 count_controller:       dd 0
 list_controllers:
 .fd:       dd list_controllers ; pointer to first item list
@@ -680,25 +696,46 @@ proc sdhci_init
         jnz     @b
         ;TODO: add settings controller
 
-        ; Сохранить регистр Capabiliti
+        ; Сохранить регистр Capabiliti и max Current Capabilities
         mov     ebx, [eax + SDHC_CAPABILITY]
         mov     [esi + SDHCI_CONTROLLER.Capabilities], ebx
         mov     ebx, [eax + SDHC_CAPABILITY + 4]
         mov     [esi + SDHCI_CONTROLLER.Capabilities + 4], ebx
         DEBUGF  1,"SDHCI:Capabilities %x %x\n",[esi + SDHCI_CONTROLLER.Capabilities + 4],[esi + SDHCI_CONTROLLER.Capabilities]
+
+        mov     ebx, [eax + SDHC_CURR_CAPABILITY]
+        mov     [esi + SDHCI_CONTROLLER.max_slot_amper], ebx
+        mov     ebx, [eax + SDHC_CURR_CAPABILITY + 4]
+        mov     [esi + SDHCI_CONTROLLER.max_slot_amper + 4], ebx
+        DEBUGF  1,"SDHCI:Max current capabilities %x %x\n",[esi + SDHCI_CONTROLLER.max_slot_amper + 4],[esi + SDHCI_CONTROLLER.max_slot_amper]
+
         ; установить значения частот
+        ;push    eax
+        ;mov     ebx, [esi + SDHCI_CPNTROLLER.Capabilities]
+        ;shr     ebx, 8
+        ;and     ebx, 111111b  ; 11 1111
+        ;mov     eax, ebx
+        ;div     dword 25 ; 25 мгц
+        ;bsr     eax
+        ;xor     edx, edx
+        ;inc     edx
+        ;shl     edx, eax
+        ;mov     dword[esi + SDHCI_CONTROLLER.divider25MHz], edx
+        ;shr     edx, 1
+        ;mov     dword[esi + SDHCI_CONTROLLER.divider50MHz], edx
+        ;mov     eax, ebx
+        ;imul    eax, 1000
+        ;div     400
+        ;div     1000
+
+        ;pop     eax
         ; Настроить маску прерываний
         ; Установить значения в Host Control Register
         ; Детектим карты
-        or      byte[eax + SDHC_CTRL1], 0x80
-        or      byte[eax + SDHC_CTRL1], 0x01    ; LED
-;        mov     ebx, 0xffffffff
-;@@:
-;        dec     ebx
-;        jnz     @b
-        test    byte[eax + SDHC_CTRL1],0x40
+        test    byte[eax + SDHC_PRSNT_STATE + 2],0x01 ; check 16 bit in SDHC_PRSNT_STATE
         jz      @f
         DEBUGF  1,'Card inserted\n'
+        call    card_init ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
 @@:
         jnz     @f
         DEBUGF  1,'Card removed\n'
@@ -711,9 +748,12 @@ proc sdhci_init
         ;set 0x2e
         ;attach interrupt
 
+        ; set Wekeup_control
+        ;or      byte[Wekeup_control], 111b
         ; set irq mask
         mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-        or      dword[eax + SDHC_INT_MASK], 0x40 or 0x80
+        or      dword[eax + SDHC_INT_MASK], -1
+        or      word[eax + SDHC_SOG_MASK], -1
         DEBUGF  1,'Set test int mask: insert and remove card \n'
         ; save and attach IRQ
         invoke  PciRead8, dword [esi + SDHCI_CONTROLLER.bus], dword [esi + SDHCI_CONTROLLER.dev], PCI_IRQ_LINE ;al=irq
@@ -723,6 +763,9 @@ proc sdhci_init
 
         mov     [esi + SDHCI_CONTROLLER.irq_line], eax ;save irq line
         invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller
+        ; set irq mask
+        mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
+        or      dword[eax + SDHC_INT_MASK], -1
         xor     eax, eax
         ret
 .fail:
@@ -731,6 +774,10 @@ proc sdhci_init
         ret
 endp
 
+proc card_init
+
+        ret
+endp
 
 proc sdhc_irq
         cli
@@ -739,6 +786,17 @@ proc sdhc_irq
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
         DEBUGF  1,"SLOT_INTRPT: %x \n", [eax + SLOT_INTRPT]
         DEBUGF  1,"SLOT_INT_STATUS: %x \n",[eax + SDHC_INT_STATUS]
+        test    dword[eax + SDHC_INT_STATUS], 0x40
+        jz      @f
+        or      dword[eax + SDHC_INT_STATUS], 0x40
+        DEBUGF  1,"SDHCI: Card insered \n"
+        call    card_init
+@@:
+        test    dword[eax + SDHC_INT_STATUS], 0x80
+        jz      @f
+        or      dword[eax + SDHC_INT_STATUS], 0x80
+        DEBUGF  1,"SDHCI: Card removed \n"
+@@:
         DEBUGF  1,"SLOT_SOG_MASK: %x \n",[eax + SDHC_SOG_MASK]
         sti
         ret
