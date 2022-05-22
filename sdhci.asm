@@ -114,7 +114,9 @@ SDHC_BUFFER     = 0x20
   ; 3-7 - Resevred
   ; 8 - Write Transfer Active
   ; 9 - Read Transfer Active
+  ;      Ётот статус используетс€ дл€ не DMA записи транзакций.
   ; 10 - Buffer Write Enable
+  ;      Ётот статус используетс€ дл€ не DMA чтени€ транзакций.
   ; 11 - Buffer Read Enable
   ; 12-15 - Reserved
   ;      Ётот бит показывает вставлена карта или нет в слот. ¬ нормальных услови€х контроллер генерит
@@ -122,13 +124,28 @@ SDHC_BUFFER     = 0x20
   ; 16 - Card Inserted
   ; 17 - Card State Stable
   ; 18 - Card Detect Pin Level
-
-  ; 19 - Write Protect Switch Pin Level
+  ;      Ётот бит отображает пин SDWP#. ѕереключатель защиты от записи поддерживаетс€ дл€ карт пам€ти
+  ;    и комбинированных карт.
+  ; 19 - Write Protect Switch Pin Level (1 - Write enable SDWP#=1, 0 - Write protected SDWP#=0)
+  ;
   ; 20-23 - DAT[0:3] Line Signal Level
+  ;      Ётот статус используетс€ дл€ проверки уровн€ CMD линии дл€ восстановлени€ после ошибки и отладки.
   ; 24 - CMD Line Signal Level
   ; 25-31 - Reserved
 SDHC_PRSNT_STATE = 0x24  ;word (12-15 , 26 Rsvd)
-
+  .CMD_INHIB_CMD = 0x01 ; for test [eax + SDHC_PRSNT_STATE], SDHC_PRSNT_STATE.CMD_INHIB_CMD
+  .CMD_INHIB_DAT = 0x02
+  .DAT_LINE_ACTIVE = 0x04
+  .WR_TX_ACTIVE    = 0x100
+  .RD_TX_ACTIVE    = 0x200
+  .BUF_WR_EN       = 0x400
+  .BUF_RD_EN       = 0x800
+  .CARD_INS        = 0x10000
+  .CARD_STABLE     = 0x20000
+  .CD_LEVEL        = 0x40000
+  .WP_LEVEL        = 0x80000
+  .DAT_LEVEL       = 0xf00000 ; 4 bits
+  .CMD_LEVEL       = 0x1000000
   ; Host control Register (offset 0x28)
   ; 0 - LED Control  (0 - LED off; 1 - LED on)
   ;       Ётот бит используетс€ дл€ предупреждени€ полдьзовател€ о том чтобы он не извлекал карту во
@@ -319,6 +336,8 @@ SDHC_INT_STATUS = 0x30
     .dma_interrupt                      = 0x08
     .buffer_write_ready                 = 0x10
     .buffer_read_ready                  = 0x20
+    ; ≈сли по€вилось прерывани€ вставки или вытаскивани€ карты, нужно проверить это через регистр 0x24 .
+    ;дл€ отключени€ генерации прерываний записать в нужный бит единицу(через or например).
     .card_insertion                     = 0x40
     .card_removal                       = 0x80
     .card_interrupt                     = 0x0100
@@ -601,6 +620,13 @@ proc START c, state:dword, cmdline:dword
         mov     eax, 0
         ret
 .stop_drv:
+        ; deattach  irq
+        ; stop power devise
+        ; free struct
+           ; free reg_map
+           ; free memory for DMA
+
+
         DEBUGF  1,"SDHCI: Stop working driver\n"
         mov     eax, 0
         ret
@@ -685,7 +711,7 @@ proc sdhci_init
         mov     [esi + SDHCI_CONTROLLER.ver_spec], cl
         DEBUGF  1,"Version specification: %x \n",[esi + SDHCI_CONTROLLER.ver_spec]
 
-
+        DEBUGF  1,"SLOT_INTRPT: %x \n", [eax + SLOT_INTRPT]
 
 
         ;reset controller (all)
@@ -710,62 +736,70 @@ proc sdhci_init
         DEBUGF  1,"SDHCI:Max current capabilities %x %x\n",[esi + SDHCI_CONTROLLER.max_slot_amper + 4],[esi + SDHCI_CONTROLLER.max_slot_amper]
 
         ; установить значени€ частот
-        ;push    eax
-        ;mov     ebx, [esi + SDHCI_CPNTROLLER.Capabilities]
-        ;shr     ebx, 8
-        ;and     ebx, 111111b  ; 11 1111
-        ;mov     eax, ebx
-        ;div     dword 25 ; 25 мгц
-        ;bsr     eax
-        ;xor     edx, edx
-        ;inc     edx
-        ;shl     edx, eax
-        ;mov     dword[esi + SDHCI_CONTROLLER.divider25MHz], edx
-        ;shr     edx, 1
-        ;mov     dword[esi + SDHCI_CONTROLLER.divider50MHz], edx
-        ;mov     eax, ebx
-        ;imul    eax, 1000
-        ;div     400
-        ;div     1000
+        push    eax
+        mov     eax, [esi + SDHCI_CONTROLLER.Capabilities]
+        shr     eax, 8
+        and     eax, 111111b  ; 11 1111
+        mov     ebx, 25
+        xor     edx, edx
+        div     ebx ; 25 мгц
+        bsr     ecx, eax
+        xor     edx, edx
+        bsf     edx, eax
+        cmp     ecx, edx
+        jnz     @f
+        dec     ecx
+@@:
+        xor     edi, edi
+        bts     edi, ecx
+        mov     dword[esi + SDHCI_CONTROLLER.divider25MHz], edi
+        DEBUGF  1,'25MHz : %u\n', edi
+        shr     edi, 1   ; +- дес€ть
+        mov     dword[esi + SDHCI_CONTROLLER.divider50MHz], edi
+        DEBUGF  1,'50MHz : %u\n', edi
+        imul    eax, 63  ; примерно
 
-        ;pop     eax
+        bsr     ecx, eax
+        xor     edx, edx
+        bsf     edx, eax
+        cmp    ecx, edx
+        jnz     @f
+        dec     ecx
+@@:
+        xor     edi, edi
+        bts     edi, ecx
+        mov     dword[esi + SDHCI_CONTROLLER.divider400KHz], edi
+        DEBUGF  1,'400KHz : %u\n', edi
+
+        pop     eax
         ; Ќастроить маску прерываний
+        ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
+        or      dword[eax + SDHC_INT_MASK], -1
+        or      word[eax + SDHC_SOG_MASK], -1
+        DEBUGF  1,'SDHCI: Set maximum int mask and mask signal\n'
         ; ”становить значени€ в Host Control Register
         ; ƒетектим карты
-        test    byte[eax + SDHC_PRSNT_STATE + 2],0x01 ; check 16 bit in SDHC_PRSNT_STATE
+        test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
         jz      @f
-        DEBUGF  1,'Card inserted\n'
         call    card_init ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
 @@:
-        jnz     @f
-        DEBUGF  1,'Card removed\n'
-@@:
-        ; включить генератор частот контроллера
         ; на этом вроде настройка завершина
 
         ;прочитать регистр 0х0-0х4f
         ;установить значени€ в host control 2
         ;set 0x2e
-        ;attach interrupt
 
         ; set Wekeup_control
         ;or      byte[Wekeup_control], 111b
-        ; set irq mask
-        mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-        or      dword[eax + SDHC_INT_MASK], -1
-        or      word[eax + SDHC_SOG_MASK], -1
-        DEBUGF  1,'Set test int mask: insert and remove card \n'
         ; save and attach IRQ
         invoke  PciRead8, dword [esi + SDHCI_CONTROLLER.bus], dword [esi + SDHCI_CONTROLLER.dev], PCI_IRQ_LINE ;al=irq
-        DEBUGF  1,'Attaching to IRQ %x\n',al
+        ;DEBUGF  1,'Attaching to IRQ %x\n',al
         movzx   eax, al
 
-
+        ;attach interrupt
         mov     [esi + SDHCI_CONTROLLER.irq_line], eax ;save irq line
         invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller
-        ; set irq mask
-        mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-        or      dword[eax + SDHC_INT_MASK], -1
+
         xor     eax, eax
         ret
 .fail:
@@ -775,6 +809,20 @@ proc sdhci_init
 endp
 
 proc card_init
+        DEBUGF  1,'SDHCI: Card inserted\n'
+        ; включить генератор частот контроллера
+
+        ;определ€ем и настраиваем карту и контроллер
+        ; ≈сли это карта пам€ти, то добавл€ем диск
+        ; сохран€ем все настройки и состо€ни€ процедур
+        ret
+endp
+
+proc card_destryct
+        DEBUGF  1,'SDHCI: Card removed\n'
+        ; удал€ем диск из списка дисков
+
+        ;очищаем все регистры св€занные с этим слотом
 
         ret
 endp
@@ -786,18 +834,20 @@ proc sdhc_irq
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
         DEBUGF  1,"SLOT_INTRPT: %x \n", [eax + SLOT_INTRPT]
         DEBUGF  1,"SLOT_INT_STATUS: %x \n",[eax + SDHC_INT_STATUS]
+        ;DEBUGF  1,"SLOT_SOG_MASK: %x \n",[eax + SDHC_SOG_MASK]
         test    dword[eax + SDHC_INT_STATUS], 0x40
-        jz      @f
+        jz      .no_card_inserted
+
         or      dword[eax + SDHC_INT_STATUS], 0x40
-        DEBUGF  1,"SDHCI: Card insered \n"
         call    card_init
-@@:
+.no_card_inserted:
         test    dword[eax + SDHC_INT_STATUS], 0x80
-        jz      @f
+        jz      .no_card_removed
+
         or      dword[eax + SDHC_INT_STATUS], 0x80
-        DEBUGF  1,"SDHCI: Card removed \n"
-@@:
-        DEBUGF  1,"SLOT_SOG_MASK: %x \n",[eax + SDHC_SOG_MASK]
+        call    card_destryct
+.no_card_removed:
+
         sti
         ret
 endp
@@ -809,6 +859,8 @@ proc service_proc stdcall, ioctl:dword
 endp
 
 drv_name:       db 'SDHCI',0
+
+sdcard_disk_name:       db 'sdcard00',0
 
 ;base_reg_map:   dd 0;pointer on base registers comntroller
 
