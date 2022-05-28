@@ -90,9 +90,53 @@ SDHC_CMD_ARG    = 0x08 ; dword
   ARGUMENT0     = 0x08 ; word
   ARGUMENT1     = 0x0A ; word
 ; Transfer Mode Register
-;
+;   Этот регистр используется для контроля операций передачи данных.Драйвер должен установить этот регистр
+; перед выполнением команды с передачей данных(смотрет Data Pressent Select в Command регистре), или перед
+; выполнением Resume команды. Драйвер должен сохранить этот регистр когда передача данных преостановлена
+; (в результате выполнения команды приостановки) и восстановить его перед выполнением команды восстановления
+; Чтобы избежать потерю данных, контроллер должен реализовать защиту от записи для этого регистра во время
+; транзакции данных.Запись в этот регистр должна игнорироваться когда Command Inhibit (DAT) равен 1.
+;            0 - DMA Enable
+;                  Этот бит обеспечивает функциональность DMA как описано в разделе 1.4 .DMA может быть
+;                включено только в том случае, если оно поддерживается в регистре возможностей.
+;                Один из режимов работы DMA может быть выбран с помощью DMA Select в Host Control регистре.
+;                Если DMA не поддерживается этот бит всегда должен быть выставлен в 0. Если этот бит
+;                установлен в 1, то операция DMA должна начинаться когда драйвер хоста записывает в
+;                верхний байт Command регистра(0x0f).
+;            1 - Block Counter Enable
+;                  Этот бит используется для включения регистра подсчёта блоков, которые имеет значение
+;                только для передачи нескольких блоко. Когда этот бит нравен 0, регистр подсчёта блоков
+;                отключается, что полезно при выполнении бесконечной передачи(см таблицу 2-8)
+;                  Если передача данных ADMA2 составляет более 65535 блоков, этот бит должен быть
+;                  установлен в 0. В этом случае длина передачи данных определяется таблицей дискрипторов.
+;            2 - Auto CMD12 Enable
+;                  Для многократной передачи блоков требуется остановка транзакции через CMD12
+;                При установке этого бита контроллер сам отправляет эту команду при завершении транзакции
+;                Драйвер хоста не должен устанавливать этот бит, если команды не требуют cmd12 для
+;                остановки передачи данных.
+;            4 - Data Transfer Direction Select
+;                  Этот бит определяет направлене передачи данных по DAT линии. 1-Передача данных с карты
+;                в хост контроллер, 0 для всех остальных случаев.(1-чтение, 0-запись)
+;            5 - Multi/ Single Block Select
+;                  Этот бит устанавливается при выдаче команд многоблочной передачи с использованием
+;                DAT линии.Для любых других команд этот бит должен быть установлен в 0. Если этот бит
+;                установлен в 0 нет необходимости устанавливать Block Count регистр.
 SDHC_CMD_TRN    = 0x0c
   transfer_mode_register = 0x0c ;word (using 0-5 bits)
+  ; Этот регистр нужно записывать только после того как проверили Command Inhibit(DAT) и (CMD),
+  ;Запись в верхний байт этого регистра начинает генерацию команды. Драйвер несёт ответственность
+  ;за запись этого регистра, поскольку контроллер не защищает запись, когда установлена Command Inhibit
+  ;(CMD)
+  ;          0-1 - Response Type Select
+  ;                   00 - No Response
+  ;                   01 - Response Length 136
+  ;                   10 - Response Length 48
+  ;                   11 - Response Length 48 check Busy after response
+  ;          3 - Command CRC Check Enable
+  ;          4 - Command index Check Enable
+  ;          5 - Data Present Select
+  ;          6-7 - Command Type
+  ;          8-13 - Command index
   command_register = 0x0e ;word  (using 0-13)
 
 ;0x10-0x1f - Response
@@ -538,6 +582,23 @@ struct  SDHCI_CONTROLLER
         divider400KHz   rd 1 ; for SDCLK frequency Select
         divider25MHz    rd 1
         divider50MHz    rd 1
+        timeout_reg     rd 1 ; offset 0x2e in reg map
+
+        type_card       rd 1 ; 0 - no card 1 - standart flash card 2 - MMC(eMMC) 3+ - other
+        card_mode       rd 1 ; 1 - spi 2 - sd bus  3+ - other
+        dma_mode        rd 1 ; 0-no dma 1-sdma 2-adma1 3 adma2
+
+        card_reg_ocr    rd 1 ; 32 bit
+        card_reg_cid    rd 4 ; 128 bit
+        card_reg_csd    rd 4 ; 128 bit (регистр может быть 2 версий)
+        card_reg_rca    rd 1 ; rw 1   ; 16 bit
+        card_reg_dsr    rd 1 ; rw 1 ;16 bit (optional)
+        card_reg_scr    rd 2 ; 64 bits
+        card_reg_ssr    rd 16 ; 512bit
+
+        program_id      rd 1 ; tid thread for working with no memory cards
+
+
 ends
 
 struct  SDHCI_SLOT
@@ -735,6 +796,28 @@ proc sdhci_init
         mov     [esi + SDHCI_CONTROLLER.max_slot_amper + 4], ebx
         DEBUGF  1,"SDHCI:Max current capabilities %x %x\n",[esi + SDHCI_CONTROLLER.max_slot_amper + 4],[esi + SDHCI_CONTROLLER.max_slot_amper]
 
+        ; получить DMA режим : 0 - no dma   1 - sdma  2 - adma1   3 - adma2-32bit   4 - adma2-64bit(не нужно, так как ос 32 бита)
+        mov     ebx, [eax + SDHC_CAPABILITY]
+        mov     ecx, 3
+        bt      ebx, 19  ; support adma2
+        jc      @f
+        dec     ecx
+        bt      ebx, 20  ; support adma1
+        jc      @f
+        dec     ecx
+        bt      ebx, 22  ; support sdma
+        jc      @f
+        dec     ecx
+@@:
+        mov     [esi + SDHCI_CONTROLLER.dma_mode], ecx
+        test    ecx, ecx
+        jz      @f
+        dec     ecx
+@@:
+        shl     ecx, 3
+        or      dword[eax + SDHC_CTRL1], ecx
+        DEBUGF  1,"SDHCI: DMA mode: %x \n", [esi + SDHCI_CONTROLLER.dma_mode]
+
         ; установить значения частот
         push    eax
         mov     eax, [esi + SDHCI_CONTROLLER.Capabilities]
@@ -772,17 +855,12 @@ proc sdhci_init
         DEBUGF  1,'400KHz : %u\n', edi
 
         pop     eax
-        ; Настроить маску прерываний
+        ; Настроить маску прерываний TODO: переделать, в соответствии с режимом DMA
         ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
         or      dword[eax + SDHC_INT_MASK], -1
         or      word[eax + SDHC_SOG_MASK], -1
         DEBUGF  1,'SDHCI: Set maximum int mask and mask signal\n'
         ; Установить значения в Host Control Register
-        ; Детектим карты
-        test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
-        jz      @f
-        call    card_init ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
-@@:
         ; на этом вроде настройка завершина
 
         ;прочитать регистр 0х0-0х4f
@@ -800,6 +878,12 @@ proc sdhci_init
         mov     [esi + SDHCI_CONTROLLER.irq_line], eax ;save irq line
         invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller
 
+        ; Детектим карты
+        test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
+        jz      @f
+        call    card_init ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
+@@:
+
         xor     eax, eax
         ret
 .fail:
@@ -810,9 +894,20 @@ endp
 
 proc card_init
         DEBUGF  1,'SDHCI: Card inserted\n'
-        ; включить генератор частот контроллера
+        ; включить генератор частот контроллера и установим базовые значения регистров
+
+        ; Включить питание (3.3В)
+
+        ; cmd0 - reset card
+
+        ;выбираем режим работы(sd bus, spi) - но это не точно
+
+        ; cmd8 - проверка напряжения   начиная со второй спецификации
+
+        ; cmd55  acmd41 - не точно
 
         ;определяем и настраиваем карту и контроллер
+
         ; Если это карта памяти, то добавляем диск
         ; сохраняем все настройки и состояния процедур
         ret
@@ -828,7 +923,6 @@ proc card_destryct
 endp
 
 proc sdhc_irq
-        cli
         mov     esi, [esp + 4] ;stdcall
         DEBUGF  1,"SDHCI: get_irq \n"
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
@@ -847,8 +941,14 @@ proc sdhc_irq
         or      dword[eax + SDHC_INT_STATUS], 0x80
         call    card_destryct
 .no_card_removed:
+        test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
+        jnz      .get_error
 
         sti
+        ret
+.get_error:
+        DEBUGF  1,"SDHCI: get error irq,  \n"
+
         ret
 endp
 ; This function for working drivers and programs worked
