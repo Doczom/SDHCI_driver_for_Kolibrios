@@ -584,7 +584,7 @@ struct  SDHCI_CONTROLLER
         divider50MHz    rd 1
         timeout_reg     rd 1 ; offset 0x2e in reg map
 
-        type_card       rd 1 ; 0 - no card 1 - standart flash card 2 - MMC(eMMC) 3+ - other
+        type_card       rd 1 ; 0 - no card 1 - SDIO 2 - MMC(eMMC) 4 - standart flash card  5+ - other
         card_mode       rd 1 ; 1 - spi 2 - sd bus  3+ - other
         dma_mode        rd 1 ; 0-no dma 1-sdma 2-adma1 3 adma2
 
@@ -810,19 +810,21 @@ proc sdhci_init
         dec     ecx
 @@:
         mov     [esi + SDHCI_CONTROLLER.dma_mode], ecx
+        DEBUGF  1,"SDHCI: DMA mode: %x \n", [esi + SDHCI_CONTROLLER.dma_mode]
         test    ecx, ecx
         jz      @f
         dec     ecx
 @@:
         shl     ecx, 3
+        ;and     ecx, not 0x111 ;не нужно так как shl ecx,3 и так запишет эти биты в ноль
         or      dword[eax + SDHC_CTRL1], ecx
-        DEBUGF  1,"SDHCI: DMA mode: %x \n", [esi + SDHCI_CONTROLLER.dma_mode]
+        ; байт 0x28 установлен в начальное значение
 
         ; установить значени€ частот
         push    eax
         mov     eax, [esi + SDHCI_CONTROLLER.Capabilities]
         shr     eax, 8
-        and     eax, 111111b  ; 11 1111
+        and     eax, 11111111b  ; 1111 1111
         mov     ebx, 25
         xor     edx, edx
         div     ebx ; 25 мгц
@@ -857,8 +859,8 @@ proc sdhci_init
         pop     eax
         ; Ќастроить маску прерываний TODO: переделать, в соответствии с режимом DMA
         ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-        or      dword[eax + SDHC_INT_MASK], -1
-        or      word[eax + SDHC_SOG_MASK], -1
+        or      dword[eax + SDHC_INT_MASK], 0x40 or 0x80
+        or      word[eax + SDHC_SOG_MASK], 0x40 or 0x80
         DEBUGF  1,'SDHCI: Set maximum int mask and mask signal\n'
         ; ”становить значени€ в Host Control Register
         ; на этом вроде настройка завершина
@@ -867,8 +869,11 @@ proc sdhci_init
         ;установить значени€ в host control 2
         ;set 0x2e
 
+        ;test
+        mov     dword[eax + SDHC_INT_STATUS], 0x00
+
         ; set Wekeup_control
-        ;or      byte[Wekeup_control], 111b
+        or      byte[Wekeup_control], 111b
         ; save and attach IRQ
         invoke  PciRead8, dword [esi + SDHCI_CONTROLLER.bus], dword [esi + SDHCI_CONTROLLER.dev], PCI_IRQ_LINE ;al=irq
         ;DEBUGF  1,'Attaching to IRQ %x\n',al
@@ -879,9 +884,10 @@ proc sdhci_init
         invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller
 
         ; ƒетектим карты
+        mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
         test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
         jz      @f
-        call    card_init ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
+        call    card_detect ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
 @@:
 
         xor     eax, eax
@@ -893,11 +899,20 @@ proc sdhci_init
 endp
 
 proc card_init
-        DEBUGF  1,'SDHCI: Card inserted\n'
+        DEBUGF  1,'SDHCI: Card init\n'
         ; включить генератор частот контроллера и установим базовые значени€ регистров
 
-        ; ¬ключить питание (3.3¬)
-
+        ; ¬ключить питание (3.3¬ - не всегда) максимально возможное дл€ хоста
+        ; дай бог чтоб не сгорело ничего
+        mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
+        shr     ebx, 24
+        and     ebx, 111b ;26bit - 1.8  25bit - 3.0  24bit - 3.3
+        bsf     ecx, ebx
+        mov     edx, 111b
+        sub     edx, ecx
+        shr     edx, 1
+        or      edx, 0x01   ; дл€ активации напри€жени€
+        or      dword[eax + SDHC_CTRL1], edx
         ; cmd0 - reset card
 
         ;выбираем режим работы(sd bus, spi) - но это не точно
@@ -905,18 +920,33 @@ proc card_init
         ; cmd8 - проверка напр€жени€   начина€ со второй спецификации
 
         ; cmd55  acmd41 - не точно
-
+.spi:
         ;определ€ем и настраиваем карту и контроллер
+        ret
+endp
+proc card_detect
+        DEBUGF  1,'SDHCI: Card inserted\n'
+        call    card_init
 
-        ; ≈сли это карта пам€ти, то добавл€ем диск
+        ; ≈сли это карта пам€ти(SD memory, eMMC, SPI), то добавл€ем диск, else set flag SDIO device
         ; сохран€ем все настройки и состо€ни€ процедур
+.memory_card:
+        call    add_card_disk
+
+        ret
+.SDIO:
+        mov     [esi + SDHCI_CONTROLLER.type_card], 1 ; sdio card
         ret
 endp
 
 proc card_destryct
         DEBUGF  1,'SDHCI: Card removed\n'
-        ; удал€ем диск из списка дисков
+        ; удал€ем диск из списка дисков если это диск
+        test    ebx, 110b
+        jz      .no_memory_card
 
+        call    del_card_disk
+.no_memory_card:
         ;очищаем все регистры св€занные с этим слотом
 
         ret
@@ -933,7 +963,7 @@ proc sdhc_irq
         jz      .no_card_inserted
 
         or      dword[eax + SDHC_INT_STATUS], 0x40
-        call    card_init
+        call    card_detect
 .no_card_inserted:
         test    dword[eax + SDHC_INT_STATUS], 0x80
         jz      .no_card_removed
@@ -941,16 +971,42 @@ proc sdhc_irq
         or      dword[eax + SDHC_INT_STATUS], 0x80
         call    card_destryct
 .no_card_removed:
+        test    dword[eax + SDHC_INT_STATUS], 0x01 ; check zero bit -  Command Complete
+        jz      .no_command_complate
+
+        or      dword[eax + SDHC_INT_STATUS], 0x01
+        DEBUGF  1,"Get command complete, CLR flag stop running \n"
+        ;and     [esi + ], 0x00
+.no_command_complate:
+        test    dword[eax + SDHC_INT_STATUS], 0x02
+        jz      .no_transfer_commplate
+
+        or      dword[eax + SDHC_INT_STATUS], 0x02
+        DEBUGF  1,"Get transfer complete, CLR flag stop running \n"
+        ;and     [esi + ], 0x00
+.no_transfer_commplate:
+
         test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
         jnz      .get_error
 
-        sti
         ret
 .get_error:
         DEBUGF  1,"SDHCI: get error irq,  \n"
 
         ret
 endp
+
+proc add_card_disk
+
+        ret
+endp
+proc del_card_disk
+
+        ret
+endp
+
+
+
 ; This function for working drivers and programs worked
 ; with SDIO interface.
 proc service_proc stdcall, ioctl:dword
