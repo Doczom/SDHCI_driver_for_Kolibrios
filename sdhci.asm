@@ -598,6 +598,9 @@ struct  SDHCI_CONTROLLER
 
         program_id      rd 1 ; tid thread for working with no memory cards
 
+        flag_command_copmlate rd 1 ; flag interrapt command complate 00 - interrapt is geting
+        flag_transfer_copmlate rd 1 ; flag interrapt transfer complate 00 -interrapt is geting
+
 
 ends
 
@@ -898,10 +901,44 @@ proc sdhci_init
         ret
 endp
 
+; eax - map reg
+; ebx - divider Clock base
+proc set_SD_clock
+        and     dword[eax + SDHC_CTRL2], 0xffff004f ; clear
+        cmp     ebx, 0x80
+        jbe     @f
+
+        push    ebx
+        shr     ebx, 8
+        and     ebx, 11b
+        shl     ebx, 6
+        or      dword[eax + SDHC_CTRL2], ebx
+        pop     ebx
+@@:
+        and     ebx, 0xff
+        shl     ebx, 8
+        or      ebx, 0x01 ; start internal clock
+        or      dword[eax + SDHC_CTRL2], ebx
+        DEBUGF  1,'SDHCI: Set clock divider\n'
+@@:
+        test    dword[eax + SDHC_CTRL2], 0x02; check stable
+        jz      @b
+        DEBUGF  1,'SDHCI: Clock stable \n'
+        or      dword[eax + SDHC_CTRL2], 0x04 ; set SD clock enable
+        ret
+endp
+; out: ebx  = type card 0 - unknow card 1 - sdio 2 - sd card(ver1 ver2 ver2-hsp ), 4 - spi(MMC, eMMC)
 proc card_init
         DEBUGF  1,'SDHCI: Card init\n'
         ; включить генератор частот контроллера и установим базовые значения регистров
+        ; генератор на 400 КГц
+        mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
+        call    set_SD_clock
+        ; очищает SDHC_CTRL1
+        and     dword[eax + SDHC_CTRL2], 11000b
 
+@@:
+        jmp     @b
         ; Включить питание (3.3В - не всегда) максимально возможное для хоста
         ; дай бог чтоб не сгорело ничего
         mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
@@ -913,29 +950,59 @@ proc card_init
         shr     edx, 1
         or      edx, 0x01   ; для активации наприяжения
         or      dword[eax + SDHC_CTRL1], edx
+        DEBUGF  1,'SDHCI: Питание включено, дай бог чтоб ничего не сгорело \n'
         ; cmd0 - reset card
 
         ;выбираем режим работы(sd bus, spi) - но это не точно
 
         ; cmd8 - проверка напряжения   начиная со второй спецификации
 
+        ; cmd5 voltage window = 0 - check sdio
+        ; if SDIO initialization (cmd5)set voltage window
+
+        ; acmd41 voltage window = 0
+
+        ;if card supported 2 spec,  acmd41 + set hsp=1
+
         ; cmd55  acmd41 - не точно
+
+        ; for no sdio card  : cmd2 - get_CID
+        ; for all init card : cmd3 - get RCA
+        ret
 .spi:
         ;определяем и настраиваем карту и контроллер
         ret
 endp
+
+proc thread_card_detect
+        ;get data on stack
+
+        ;call   card_detect
+        call    card_detect
+        ; destryct thread
+
+endp
+
 proc card_detect
         DEBUGF  1,'SDHCI: Card inserted\n'
         call    card_init
-
+        mov     [esi + SDHCI_CONTROLLER.type_card], ebx
+        test    ebx, ebx
+        jz      .unknowe
+        dec     ebx
+        jz      .SDIO
         ; Если это карта памяти(SD memory, eMMC, SPI), то добавляем диск, else set flag SDIO device
         ; сохраняем все настройки и состояния процедур
 .memory_card:
         call    add_card_disk
-
+        DEBUGF  1,'SDHCI: Card init - Memory card\n'
         ret
 .SDIO:
-        mov     [esi + SDHCI_CONTROLLER.type_card], 1 ; sdio card
+        ;mov     [esi + SDHCI_CONTROLLER.type_card], 1 ; sdio card
+        DEBUGF  1,'SDHCI: Card init - SDIO card\n'
+        ret
+.unknowe:
+        DEBUGF  1,'SDHCI: Card not init\n'
         ret
 endp
 
@@ -963,6 +1030,12 @@ proc sdhc_irq
         jz      .no_card_inserted
 
         or      dword[eax + SDHC_INT_STATUS], 0x40
+        pusha
+        mov     ebx, 1
+        mov     ecx, card_detect
+        mov     edx, 0 ; stack - for kernel mode kernel alloc 8Kb RAM
+        invoke  CreateThread
+        popa
         call    card_detect
 .no_card_inserted:
         test    dword[eax + SDHC_INT_STATUS], 0x80
@@ -976,14 +1049,14 @@ proc sdhc_irq
 
         or      dword[eax + SDHC_INT_STATUS], 0x01
         DEBUGF  1,"Get command complete, CLR flag stop running \n"
-        ;and     [esi + ], 0x00
+        and     [esi + SDHCI_CONTROLLER.flag_command_copmlate], 0x00
 .no_command_complate:
         test    dword[eax + SDHC_INT_STATUS], 0x02
         jz      .no_transfer_commplate
 
         or      dword[eax + SDHC_INT_STATUS], 0x02
         DEBUGF  1,"Get transfer complete, CLR flag stop running \n"
-        ;and     [esi + ], 0x00
+        and     [esi + SDHCI_CONTROLLER.flag_transfer_copmlate], 0x00
 .no_transfer_commplate:
 
         test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
