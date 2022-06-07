@@ -904,6 +904,9 @@ endp
 ; eax - map reg
 ; ebx - divider Clock base
 proc set_SD_clock
+        and     dword[eax + SDHC_CTRL2], 0xffffffff - 0x04
+
+
         and     dword[eax + SDHC_CTRL2], 0xffff004f ; clear
         cmp     ebx, 0x80
         jbe     @f
@@ -930,15 +933,7 @@ endp
 ; out: ebx  = type card 0 - unknow card 1 - sdio 2 - sd card(ver1 ver2 ver2-hsp ), 4 - spi(MMC, eMMC)
 proc card_init
         DEBUGF  1,'SDHCI: Card init\n'
-        ; включить генератор частот контроллера и установим базовые значения регистров
-        ; генератор на 400 КГц
-        mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
-        call    set_SD_clock
-        ; очищает SDHC_CTRL1
-        and     dword[eax + SDHC_CTRL1], 11000b
 
-@@:
-        jmp     @b
         ; Включить питание (3.3В - не всегда) максимально возможное для хоста
         ; дай бог чтоб не сгорело ничего
         mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
@@ -951,6 +946,13 @@ proc card_init
         or      edx, 0x01   ; для активации наприяжения
         or      dword[eax + SDHC_CTRL1], edx
         DEBUGF  1,'SDHCI: Питание включено, дай бог чтоб ничего не сгорело \n'
+
+        ; включить генератор частот контроллера и установим базовые значения регистров
+        ; генератор на 400 КГц
+        mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
+        call    set_SD_clock
+        ; очищает SDHC_CTRL1
+        and     dword[eax + SDHC_CTRL1], 11000b + 0x0f00 ;оставляем только dma режим b power control
         ; cmd0 - reset card
 
         ;выбираем режим работы(sd bus, spi) - но это не точно
@@ -989,7 +991,7 @@ proc thread_card_detect
         mov     eax, edi
         invoke  Kfree
         mov     eax, ecx
-        ;call    card_detect
+        call    card_detect
 .no_malloc:
         ; destryct thread
         mov     eax, -1
