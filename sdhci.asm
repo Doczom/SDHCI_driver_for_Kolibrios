@@ -935,7 +935,7 @@ proc card_init
         mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
         call    set_SD_clock
         ; очищает SDHC_CTRL1
-        and     dword[eax + SDHC_CTRL2], 11000b
+        and     dword[eax + SDHC_CTRL1], 11000b
 
 @@:
         jmp     @b
@@ -975,12 +975,25 @@ proc card_init
 endp
 
 proc thread_card_detect
-        ;get data on stack
-
-        ;call   card_detect
-        call    card_detect
+        ;get event with data
+        invoke  Kmalloc, 6*4
+        test    eax, eax
+        jz      .no_malloc
+        mov     edi, eax
+        push    edi
+        invoke  GetEvent
+        pop     edi
+        DEBUGF  1,'SDHCI: Get event code=%x [edi + 4]=%x, [edi + 8]=%x\n', [edi], [edi + 4], [edi + 8]
+        mov     ecx,[edi + 4] ; reg map
+        mov     esi,[edi + 8] ;controller struct
+        mov     eax, edi
+        invoke  Kfree
+        mov     eax, ecx
+        ;call    card_detect
+.no_malloc:
         ; destryct thread
-
+        mov     eax, -1
+        int     0x40
 endp
 
 proc card_detect
@@ -1020,7 +1033,9 @@ proc card_destryct
 endp
 
 proc sdhc_irq
-        mov     esi, [esp + 4] ;stdcall
+        pusha
+        DEBUGF  1,"SDHCI: call sdhc_irq, esp=%x \n", esp
+        mov     esi, [esp + 4 + 32] ;stdcall
         DEBUGF  1,"SDHCI: get_irq \n"
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
         DEBUGF  1,"SLOT_INTRPT: %x \n", [eax + SLOT_INTRPT]
@@ -1030,13 +1045,29 @@ proc sdhc_irq
         jz      .no_card_inserted
 
         or      dword[eax + SDHC_INT_STATUS], 0x40
-        pusha
+        ; create thread for init card
+        push     esi
+        push     eax
         mov     ebx, 1
-        mov     ecx, card_detect
+        mov     ecx, thread_card_detect
         mov     edx, 0 ; stack - for kernel mode kernel alloc 8Kb RAM
         invoke  CreateThread
-        popa
-        call    card_detect
+        DEBUGF  1,"SDHCI: create thread tid=%x \n", eax
+        test    eax, eax
+        pop     ebx
+        pop     ecx
+        jz      .no_card_inserted
+        ; send event for thread
+        mov     [.event_struct + 4], ebx ; reg map
+        mov     [.event_struct + 8], ecx ; sdhci_controller struct
+        mov     esi, .event_struct
+        DEBUGF  1,"SDHCI: send event tid=%x code[1]=%x code[2]=%x \n", eax, [.event_struct + 4], [.event_struct + 8]
+        push    ecx
+        push    ebx
+        invoke  SendEvent
+        DEBUGF  1,"SDHCI: Evend sended, eax=%x uid=%x \n", eax, ebx
+        pop     eax
+        pop     esi
 .no_card_inserted:
         test    dword[eax + SDHC_INT_STATUS], 0x80
         jz      .no_card_removed
@@ -1062,11 +1093,18 @@ proc sdhc_irq
         test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
         jnz      .get_error
 
+        DEBUGF  1,"SDHCI: ret sdhc_irq, esp=%x \n", esp
+        popa
         ret
 .get_error:
         DEBUGF  1,"SDHCI: get error irq,  \n"
 
+        popa
         ret
+
+.event_struct: ; 6*dword
+        dd     0xff0000ff
+        rd     5
 endp
 
 proc add_card_disk
