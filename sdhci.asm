@@ -560,6 +560,8 @@ include 'drivers/macros.inc'
 include 'drivers/peimport.inc'
 include 'drivers/fdo.inc'
 
+
+include 'sdhc_cmd.inc'
 ; structures
 struct  SDHCI_CONTROLLER
         fd      rd 1   ; next controller
@@ -620,7 +622,7 @@ list_controllers:
 tmp_void:       dd 0
 
 proc START c, state:dword, cmdline:dword
-        cmp   [state],1
+        cmp   [state], DRV_ENTRY
         jne   .stop_drv
 
         ;detect controller
@@ -691,8 +693,8 @@ proc START c, state:dword, cmdline:dword
            ; free memory for DMA
 
 
-        DEBUGF  1,"SDHCI: Stop working driver\n"
-        mov     eax, 0
+        DEBUGF  1, "SDHCI: Stop working driver\n"
+        xor     eax, eax
         ret
 
         ;DEBUGF   1,"Controller found: class:=%x bus:=%x devfn:=%x \n",[eax + PCIDEV.class],[bus],[dev]
@@ -770,6 +772,7 @@ proc sdhci_init
         test    eax, eax
         jz      .fail
 
+        DEBUGF  1,"SDHCI: base address = %x \n", eax
         mov     [esi + SDHCI_CONTROLLER.base_reg_map], eax
         mov     cl, [eax + SPEC_VERSION] ; get specification version
         mov     [esi + SDHCI_CONTROLLER.ver_spec], cl
@@ -904,7 +907,7 @@ endp
 ; eax - map reg
 ; ebx - divider Clock base
 proc set_SD_clock
-        and     dword[eax + SDHC_CTRL2], 0xffffffff - 0x04
+        and     dword[eax + SDHC_CTRL2], 0xffffffff - 0x04  ; stop clock
 
 
         and     dword[eax + SDHC_CTRL2], 0xffff004f ; clear
@@ -933,7 +936,9 @@ endp
 ; out: ebx  = type card 0 - unknow card 1 - sdio 2 - sd card(ver1 ver2 ver2-hsp ), 4 - spi(MMC, eMMC)
 proc card_init
         DEBUGF  1,'SDHCI: Card init\n'
-
+        ;включаем прерывани€ 0х01
+        or      dword[eax + SDHC_INT_MASK], 0xFFFF0001
+        or      dword[eax + SDHC_SOG_MASK], 0xFFFF0001
         ; ¬ключить питание (3.3¬ - не всегда) максимально возможное дл€ хоста
         ; дай бог чтоб не сгорело ничего
         mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
@@ -952,24 +957,31 @@ proc card_init
         mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
         call    set_SD_clock
         ; очищает SDHC_CTRL1
-        and     dword[eax + SDHC_CTRL1], 11000b + 0x0f00 ;оставл€ем только dma режим b power control
-        ; cmd0 - reset card
+        and     dword[eax + SDHC_CTRL1], 11000b + 0x0f00 ;оставл€ем только dma режим и power control
 
+        ;; !!! Ќачинаетс€ алгоритм инициализации карты !!!
+
+        ; cmd0 - reset card
+        call    GO_IDLE_SATTE
         ;выбираем режим работы(sd bus, spi) - но это не точно
 
         ; cmd8 - проверка напр€жени€   начина€ со второй спецификации
-
+        call    SEND_IF_COUND
         ; cmd5 voltage window = 0 - check sdio
+        call    IO_SEND_OP_COND
         ; if SDIO initialization (cmd5)set voltage window
 
         ; acmd41 voltage window = 0
-
+        call    SD_SEND_OP_COND
         ;if card supported 2 spec,  acmd41 + set hsp=1
 
         ; cmd55  acmd41 - не точно
 
         ; for no sdio card  : cmd2 - get_CID
+        call    ALL_SEND_CID
         ; for all init card : cmd3 - get RCA
+        call    SEND_RCA
+
         ret
 .spi:
         ;определ€ем и настраиваем карту и контроллер
@@ -978,19 +990,20 @@ endp
 
 proc thread_card_detect
         ;get event with data
-        invoke  Kmalloc, 6*4
+        invoke  Kmalloc, 6*4  ; 6*Dword
         test    eax, eax
         jz      .no_malloc
         mov     edi, eax
         push    edi
         invoke  GetEvent
         pop     edi
-        DEBUGF  1,'SDHCI: Get event code=%x [edi + 4]=%x, [edi + 8]=%x\n', [edi], [edi + 4], [edi + 8]
-        mov     ecx,[edi + 4] ; reg map
-        mov     esi,[edi + 8] ;controller struct
+        ;DEBUGF  1,'SDHCI: Get event code=%x [edi + 4]=%x, [edi + 8]=%x\n', [edi], [edi + 4], [edi + 8]
+        push    dword[edi + 4] ; reg map
+        push    dword[edi + 8] ;controller struct
         mov     eax, edi
         invoke  Kfree
-        mov     eax, ecx
+        pop     esi
+        pop     eax
         call    card_detect
 .no_malloc:
         ; destryct thread
@@ -999,6 +1012,7 @@ proc thread_card_detect
 endp
 
 proc card_detect
+        DEBUGF  1,'SDHCI: eax=%x esi=%x\n', eax, esi
         DEBUGF  1,'SDHCI: Card inserted\n'
         call    card_init
         mov     [esi + SDHCI_CONTROLLER.type_card], ebx
@@ -1036,7 +1050,6 @@ endp
 
 proc sdhc_irq
         pusha
-        DEBUGF  1,"SDHCI: call sdhc_irq, esp=%x \n", esp
         mov     esi, [esp + 4 + 32] ;stdcall
         DEBUGF  1,"SDHCI: get_irq \n"
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
@@ -1063,11 +1076,11 @@ proc sdhc_irq
         mov     [.event_struct + 4], ebx ; reg map
         mov     [.event_struct + 8], ecx ; sdhci_controller struct
         mov     esi, .event_struct
-        DEBUGF  1,"SDHCI: send event tid=%x code[1]=%x code[2]=%x \n", eax, [.event_struct + 4], [.event_struct + 8]
+        ;DEBUGF  1,"SDHCI: send event tid=%x code[1]=%x code[2]=%x \n", eax, [.event_struct + 4], [.event_struct + 8]
         push    ecx
         push    ebx
         invoke  SendEvent
-        DEBUGF  1,"SDHCI: Evend sended, eax=%x uid=%x \n", eax, ebx
+        ;DEBUGF  1,"SDHCI: Evend sended, eax=%x uid=%x \n", eax, ebx
         pop     eax
         pop     esi
 .no_card_inserted:
@@ -1095,7 +1108,7 @@ proc sdhc_irq
         test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
         jnz      .get_error
 
-        DEBUGF  1,"SDHCI: ret sdhc_irq, esp=%x \n", esp
+        ;DEBUGF  1,"SDHCI: ret sdhc_irq, esp=%x \n", esp
         popa
         ret
 .get_error:
@@ -1130,6 +1143,7 @@ endp
 drv_name:       db 'SDHCI',0
 
 sdcard_disk_name:       db 'sdcard00',0
+mmccard_disk_name:      db 'MMCcard00',0
 
 ;base_reg_map:   dd 0;pointer on base registers comntroller
 
