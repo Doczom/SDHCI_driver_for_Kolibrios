@@ -18,9 +18,9 @@ proc  send_sdhc_command
 @@:
         ;test    dword[esi + SDHCI_CONTROLLER.flag_command_copmlate], -1
         test    dword[eax + SDHC_INT_STATUS], 0x01
-        jnz     @b
+        jz     @b
+        DEBUGF  1,"SDHCI: Command is out INT_STAT=%x\n", [eax + SDHC_INT_STATUS]
         or      dword[eax + SDHC_INT_STATUS], 0x01
-        DEBUGF  1,"SDHCI: Command is out\n"
         DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
         ret
 endp
@@ -30,8 +30,8 @@ endp
 ;cmd0 - Resets all cards to idle state
 proc  GO_IDLE_SATTE
         xor     ebx, ebx
-        mov     ecx, 0x00
-        mov     edx, 0x00
+        mov     ecx, 0x02 ; read mull
+        mov     edx, 0x0220
         call    send_sdhc_command
         ret
 endp

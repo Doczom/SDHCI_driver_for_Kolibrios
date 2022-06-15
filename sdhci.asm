@@ -939,6 +939,7 @@ proc card_init
         ;включаем прерывания 0х01
         or      dword[eax + SDHC_INT_MASK], 0xFFFF0001
         or      dword[eax + SDHC_SOG_MASK], 0xFFFF0001
+        DEBUGF  1,'SDHCI: INT_MASK = %x\n',[eax + SDHC_INT_MASK]
         ; Включить питание (3.3В - не всегда) максимально возможное для хоста
         ; дай бог чтоб не сгорело ничего
         mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
@@ -955,6 +956,7 @@ proc card_init
         ; включить генератор частот контроллера и установим базовые значения регистров
         ; генератор на 400 КГц
         mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
+        mov     ebx, [esi + SDHCI_CONTROLLER.divider25MHz]
         call    set_SD_clock
         ; очищает SDHC_CTRL1
         and     dword[eax + SDHC_CTRL1], 11000b + 0x0f00 ;оставляем только dma режим и power control
@@ -1031,6 +1033,9 @@ proc card_detect
         DEBUGF  1,'SDHCI: Card init - SDIO card\n'
         ret
 .unknowe:
+        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
+        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
+
         DEBUGF  1,'SDHCI: Card not init\n'
         ret
 endp
