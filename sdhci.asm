@@ -1,4 +1,4 @@
-;;      Copyright (C) 2022, Michail Frolov(aka Doczom)
+;;      Copyright (C) 2022, Michael Frolov aka Doczom
 ;; SD host controller driver.
 ;;
 ;;                 !!!!ВНИМАНИЕ!!!!
@@ -590,11 +590,11 @@ struct  SDHCI_CONTROLLER
         card_mode       rd 1 ; 1 - spi 2 - sd bus  3+ - other
         dma_mode        rd 1 ; 0-no dma 1-sdma 2-adma1 3 adma2
 
-        card_reg_ocr    rd 1 ; 32 bit
-        card_reg_cid    rd 4 ; 128 bit
+        card_reg_ocr    rd 1 ; 32 bit  card voltage
+        card_reg_cid    rd 4 ; 128 bit 120 bit
         card_reg_csd    rd 4 ; 128 bit (регистр может быть 2 версий)
-        card_reg_rca    rd 1 ; rw 1   ; 16 bit
-        card_reg_dsr    rd 1 ; rw 1 ;16 bit (optional)
+        card_reg_rca    rw 1 ; rw 1   ; 16 bit
+        card_reg_dsr    rw 1 ; rw 1 ;16 bit (optional)
         card_reg_scr    rd 2 ; 64 bits
         card_reg_ssr    rd 16 ; 512bit
 
@@ -602,8 +602,10 @@ struct  SDHCI_CONTROLLER
 
         flag_command_copmlate rd 1 ; flag interrapt command complate 00 - interrapt is geting
         flag_transfer_copmlate rd 1 ; flag interrapt transfer complate 00 -interrapt is geting
-
-
+        int_status      rd 1 ; copy SDHC_INT_STATUS
+                        rd 4 ; reserved
+        status_control  rd 1 ; flags status controller(0x01 - get irq AND int_status good)
+                             ; status for write\read  disk, global flags
 ends
 
 struct  SDHCI_SLOT
@@ -622,8 +624,9 @@ list_controllers:
 tmp_void:       dd 0
 
 proc START c, state:dword, cmdline:dword
-        cmp   [state], DRV_ENTRY
-        jne   .stop_drv
+        cmp     [state], DRV_ENTRY
+        push    ebx esi edi ebp
+        jne     .stop_drv
 
         ;detect controller
         DEBUGF  1,"SDHCI: Loading driver\n"
@@ -679,11 +682,13 @@ proc START c, state:dword, cmdline:dword
         jz      .not_found
 
         DEBUGF  1,"SDHCI: Found %d controllers\n", [count_controller]
-        invoke  RegService, drv_name, service_proc
+        invoke  RegService, drv_name, 0 ;service_proc
+        pop     ebp edi esi ebx
         ret
 .not_found:
         DEBUGF  1,"SDHCI: Contriller not found\n"
         mov     eax, 0
+        pop     ebp edi esi ebx
         ret
 .stop_drv:
         ; deattach  irq
@@ -692,9 +697,9 @@ proc START c, state:dword, cmdline:dword
            ; free reg_map
            ; free memory for DMA
 
-
         DEBUGF  1, "SDHCI: Stop working driver\n"
         xor     eax, eax
+        pop     ebp edi esi ebx
         ret
 
         ;DEBUGF   1,"Controller found: class:=%x bus:=%x devfn:=%x \n",[eax + PCIDEV.class],[bus],[dev]
@@ -711,9 +716,6 @@ proc START c, state:dword, cmdline:dword
 ;@@:
         ;mov     [SDMA_sys_addr],ebx
         ;DEBUGF  1,"set SDMA_sys_addr : %x \n",[SDMA_sys_addr]
-
-
-        ;reset controller
 
 
         ; TODO: working with registers controller
@@ -885,6 +887,9 @@ proc sdhci_init
         ;DEBUGF  1,'Attaching to IRQ %x\n',al
         movzx   eax, al
 
+        ;invoke  PciWrite16, [esi + SDHCI_CONTROLLER.bus], [esi + SDHCI_CONTROLLER.dev], dword 0x82, 0x0000
+        ; disable smi ;SD_PCI_MSI_CTRL- RW - 16bits - [SD_PCI_CFG: 82h]
+
         ;attach interrupt
         mov     [esi + SDHCI_CONTROLLER.irq_line], eax ;save irq line
         invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller
@@ -935,7 +940,8 @@ proc set_SD_clock
 endp
 ; out: ebx  = type card 0 - unknow card 1 - sdio 2 - sd card(ver1 ver2 ver2-hsp ), 4 - spi(MMC, eMMC)
 proc card_init
-        DEBUGF  1,'SDHCI: Card init\n'
+        ;DEBUGF  1,'SDHCI: Card init\n'
+        mov     dword[esi + SDHCI_CONTROLLER.card_reg_rca], 0 ; обнуляем адрес карты
         ;включаем прерывания 0х01
         or      dword[eax + SDHC_INT_MASK], 0xFFFF0001
         or      dword[eax + SDHC_SOG_MASK], 0xFFFF0001
@@ -945,18 +951,20 @@ proc card_init
         mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
         shr     ebx, 24
         and     ebx, 111b ;26bit - 1.8  25bit - 3.0  24bit - 3.3
-        bsf     ecx, ebx
+        bsf     ecx, ebx  ;ecx= 0 for 3.3, 1 for 3.0 , 2 for 1.8
+        jz      .err
         mov     edx, 111b
-        sub     edx, ecx
-        shr     edx, 1
+        sub     edx, ecx  ; see format data this register in specs
+        shl     edx, 1
         or      edx, 0x01   ; для активации наприяжения
+        shl     edx, 8 ; offset 0x29
         or      dword[eax + SDHC_CTRL1], edx
+        DEBUGF  1,'SDHCI: SDHC_CTRL1= %x \n',[eax + SDHC_CTRL1]
         DEBUGF  1,'SDHCI: Питание включено, дай бог чтоб ничего не сгорело \n'
 
         ; включить генератор частот контроллера и установим базовые значения регистров
         ; генератор на 400 КГц
         mov     ebx, [esi + SDHCI_CONTROLLER.divider400KHz]
-        mov     ebx, [esi + SDHCI_CONTROLLER.divider25MHz]
         call    set_SD_clock
         ; очищает SDHC_CTRL1
         and     dword[eax + SDHC_CTRL1], 11000b + 0x0f00 ;оставляем только dma режим и power control
@@ -964,29 +972,73 @@ proc card_init
         ;; !!! Начинается алгоритм инициализации карты !!!
 
         ; cmd0 - reset card
-        call    GO_IDLE_SATTE
-        ;выбираем режим работы(sd bus, spi) - но это не точно
+        GO_IDLE_SATTE  ; ok
+        ;выбираем режим работы(sd bus, spi) - но это не точно  ; Это не тут, ниже
 
-        ; cmd8 - проверка напряжения   начиная со второй спецификации
-        call    SEND_IF_COUND
         ; cmd5 voltage window = 0 - check sdio
-        call    IO_SEND_OP_COND
-        ; if SDIO initialization (cmd5)set voltage window
+        DEBUGF  1,"SDHCI: CMD5 - check SDIO\n"
+        xor     ebx, ebx ; arg cmd, zero to get voltage mask and to check SDIO functions
+        call    IO_SEND_OP_COND; 0 - test voltage mask to check SDIO interface, ZF=1-sdio
+        jz      .sdio
 
         ; acmd41 voltage window = 0
+        DEBUGF  1,"SDHCI: ACMD41 - get OCR\n"
         call    SD_SEND_OP_COND
+
+        ; cmd8 - проверка напряжения   начиная со второй спецификации
+        DEBUGF  1,"SDHCI: CMD8 - check SDHC card\n"
+        call    SEND_IF_COUND
+        mov     ebx, 0 ; no set EFLAGS
         ;if card supported 2 spec,  acmd41 + set hsp=1
-
-        ; cmd55  acmd41 - не точно
-
+        jnz     .acmd41_no_hsp
+        mov     ebx, 1 shl 30 ; set HSP
+.acmd41_no_hsp:
+        or      ebx, [esi + SDHCI_CONTROLLER.card_reg_ocr] ; set mask sd card
+        cmp     byte[eax + 0x29], 1011b ;1.8
+        jnz     @f
+        and     ebx, (1 shl 30) + 0x80 ; see OCR reg
+@@:
+        cmp     byte[eax + 0x29], 1101b ;3.0
+        jnz     @f
+        and     ebx, (1 shl 30) + (1 shl 17) ; see OCR reg
+@@:
+        cmp     byte[eax + 0x29], 1111b ;1.8
+        jnz     @f
+        and     ebx, (1 shl 30) + (1 shl 20) ; see OCR reg
+@@:
+        test    ebx, 0xffffff
+        jz      .err
+.set_acmd41:
+        ; acmd41  - с нужной маской вольтажа
+        call    SD_SEND_OP_COND
+        jnz     .err
+        test    dword[eax + SDHC_RESP1_0], 0x80000000 ; check 31 bit
+        jz      .set_acmd41
         ; for no sdio card  : cmd2 - get_CID
-        call    ALL_SEND_CID
+        ALL_SEND_CID           ; пока выбрасывает ошибку таймаута, а в виду отсутствия
+                               ; правильной проверки irq всё виснит
         ; for all init card : cmd3 - get RCA
         call    SEND_RCA
 
+        mov     ebx, 2
         ret
-.spi:
+.sdio:
+        DEBUGF  1,"SDHCI: detect SDIO card. init\n"
+        ; SDIO initialization (cmd5)set voltage window
+        ;call    IO_SEND_OP_COND
+
+        ;call    SEND_RCA
+
+        mov     ebx, 1
+        xor     ebx, ebx ;DELETE
+        ret
+.mmc:
         ;определяем и настраиваем карту и контроллер
+        mov     ebx, 4
+        ret
+.err:
+        DEBUGF  1,'SDHCI: ERROR INIT CARD\n'
+        xor     ebx, ebx
         ret
 endp
 
@@ -1014,7 +1066,7 @@ proc thread_card_detect
 endp
 
 proc card_detect
-        DEBUGF  1,'SDHCI: eax=%x esi=%x\n', eax, esi
+        ;DEBUGF  1,'SDHCI: eax=%x esi=%x\n', eax, esi
         DEBUGF  1,'SDHCI: Card inserted\n'
         call    card_init
         mov     [esi + SDHCI_CONTROLLER.type_card], ebx
@@ -1053,6 +1105,10 @@ proc card_destryct
         ret
 endp
 
+; TODO: Доделать систему обработки сигналов ошибки и переработать работу
+; с сигналами результата работы команд(сейчас это очень плохо сделано).
+; добавить(уже там) 2 поля, для хранения данных об полученном прерывании.
+; + статус работы с контроллером(для блокировок)
 proc sdhc_irq
         pusha
         mov     esi, [esp + 4 + 32] ;stdcall
@@ -1060,7 +1116,9 @@ proc sdhc_irq
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
         DEBUGF  1,"SLOT_INTRPT: %x \n", [eax + SLOT_INTRPT]
         DEBUGF  1,"SLOT_INT_STATUS: %x \n",[eax + SDHC_INT_STATUS]
-        ;DEBUGF  1,"SLOT_SOG_MASK: %x \n",[eax + SDHC_SOG_MASK]
+        cmp    dword[eax + SDHC_INT_STATUS], 0
+        jz      .fail
+
         test    dword[eax + SDHC_INT_STATUS], 0x40
         jz      .no_card_inserted
 
@@ -1095,33 +1153,45 @@ proc sdhc_irq
         or      dword[eax + SDHC_INT_STATUS], 0x80
         call    card_destryct
 .no_card_removed:
-        test    dword[eax + SDHC_INT_STATUS], 0x01 ; check zero bit -  Command Complete
-        jz      .no_command_complate
 
-        or      dword[eax + SDHC_INT_STATUS], 0x01
-        DEBUGF  1,"Get command complete, CLR flag stop running \n"
-        and     [esi + SDHCI_CONTROLLER.flag_command_copmlate], 0x00
-.no_command_complate:
-        test    dword[eax + SDHC_INT_STATUS], 0x02
-        jz      .no_transfer_commplate
 
-        or      dword[eax + SDHC_INT_STATUS], 0x02
-        DEBUGF  1,"Get transfer complete, CLR flag stop running \n"
-        and     [esi + SDHCI_CONTROLLER.flag_transfer_copmlate], 0x00
-.no_transfer_commplate:
+        mov     ecx, [eax + SDHC_INT_STATUS]
+        mov     dword[esi + SDHCI_CONTROLLER.int_status], ecx
+        mov     [eax + SDHC_INT_STATUS], ecx ; гасим прерывания
 
-        test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
-        jnz      .get_error
 
-        ;DEBUGF  1,"SDHCI: ret sdhc_irq, esp=%x \n", esp
+;        test    dword[eax + SDHC_INT_STATUS], 0x01 ; check zero bit -  Command Complete
+;        jz      .no_command_complate
+;
+;        or      dword[eax + SDHC_INT_STATUS], 0x01
+;        DEBUGF  1,"Get Command Complete\n"
+;        and     [esi + SDHCI_CONTROLLER.flag_command_copmlate], 0x00  ; TODO: поменять на норм флаги
+;.no_command_complate:
+;        test    dword[eax + SDHC_INT_STATUS], 0x02
+;        jz      .no_transfer_commplate
+;
+;        or      dword[eax + SDHC_INT_STATUS], 0x02
+;        DEBUGF  1,"Get transfer complete\n"
+;        and     [esi + SDHCI_CONTROLLER.flag_transfer_copmlate], 0x00
+;.no_transfer_commplate:
+;
+;        test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
+;        jnz      .get_error
+
         popa
+        xor     eax, eax
         ret
-.get_error:
-        DEBUGF  1,"SDHCI: get error irq,  \n"
-
+;.get_error:
+;        DEBUGF  1,"SDHCI: get error irq,  \n"
+;
+;        popa
+;        xor     eax, eax
+;        ret
+.fail:
         popa
+        xor     eax, eax
+        inc     eax
         ret
-
 .event_struct: ; 6*dword
         dd     0xff0000ff
         rd     5
