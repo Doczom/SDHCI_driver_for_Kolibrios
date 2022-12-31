@@ -562,6 +562,8 @@ include 'drivers/fdo.inc'
 
 
 include 'sdhc_cmd.inc'
+include 'sdhc_disk.inc'
+include 'sdhci_adma.inc'
 ; structures
 struct  SDHCI_CONTROLLER
         fd      rd 1   ; next controller
@@ -984,34 +986,22 @@ proc card_init
         ; acmd41 voltage window = 0
         DEBUGF  1,"SDHCI: ACMD41 - get OCR\n"
         call    SD_SEND_OP_COND
+        jnz     .mmc ; if error command
 
         ; cmd8 - проверка напряжения   начиная со второй спецификации
         DEBUGF  1,"SDHCI: CMD8 - check SDHC card\n"
         call    SEND_IF_COUND
         mov     ebx, 0 ; no set EFLAGS
         ;if card supported 2 spec,  acmd41 + set hsp=1
-        jnz     .acmd41_no_hsp
+        jnz     @f
         mov     ebx, 1 shl 30 ; set HSP
-.acmd41_no_hsp:
-        or      ebx, [esi + SDHCI_CONTROLLER.card_reg_ocr] ; set mask sd card
-        cmp     byte[eax + 0x29], 1011b ;1.8
-        jnz     @f
-        and     ebx, (1 shl 30) + 0x80 ; see OCR reg
 @@:
-        cmp     byte[eax + 0x29], 1101b ;3.0
-        jnz     @f
-        and     ebx, (1 shl 30) + (1 shl 17) ; see OCR reg
-@@:
-        cmp     byte[eax + 0x29], 1111b ;1.8
-        jnz     @f
-        and     ebx, (1 shl 30) + (1 shl 20) ; see OCR reg
-@@:
-        test    ebx, 0xffffff
+        call    get_ocr_mask
         jz      .err
 .set_acmd41:
         ; acmd41  - с нужной маской вольтажа
         call    SD_SEND_OP_COND
-        jnz     .err
+        jnz     .mmc
         test    dword[eax + SDHC_RESP1_0], 0x80000000 ; check 31 bit
         jz      .set_acmd41
         ; for no sdio card  : cmd2 - get_CID
@@ -1020,21 +1010,37 @@ proc card_init
         ; for all init card : cmd3 - get RCA
         call    SEND_RCA
 
+        ;TODO: get CSD register
+        call    SEND_CSD
+        ;TODO: get SCR register
         mov     ebx, 2
         ret
 .sdio:
-        DEBUGF  1,"SDHCI: detect SDIO card. init\n"
+        xor     ebx, ebx
+        call    get_ocr_mask
+        jz      .err
+@@:
         ; SDIO initialization (cmd5)set voltage window
-        ;call    IO_SEND_OP_COND
+        call    IO_SEND_OP_COND
+        jnz     .err
+        test    dword[eax + SDHC_RESP1_0], 0x80000000 ; check 31 bit
+        jz      @b
 
-        ;call    SEND_RCA
+        call    SEND_RCA
+
+        ;TODO: get CSD register
+        call    SEND_CSD
+        ;TODO: get SCR register
 
         mov     ebx, 1
-        xor     ebx, ebx ;DELETE
         ret
+
 .mmc:
         ;определяем и настраиваем карту и контроллер
+        ;cmd1
+        ;TODO: НАЙТИ АЛГОРИТМ ИНИЦИАЛИЗАЦИИ MMC КАРТ!!!
         mov     ebx, 4
+        xor     ebx, ebx ;DELETE
         ret
 .err:
         DEBUGF  1,'SDHCI: ERROR INIT CARD\n'
@@ -1068,7 +1074,7 @@ endp
 proc card_detect
         ;DEBUGF  1,'SDHCI: eax=%x esi=%x\n', eax, esi
         DEBUGF  1,'SDHCI: Card inserted\n'
-        call    card_init
+        call    card_init                 ; TODO: get CSD and SRC registers + get SSR register
         mov     [esi + SDHCI_CONTROLLER.type_card], ebx
         test    ebx, ebx
         jz      .unknowe
@@ -1083,6 +1089,9 @@ proc card_detect
 .SDIO:
         ;mov     [esi + SDHCI_CONTROLLER.type_card], 1 ; sdio card
         DEBUGF  1,'SDHCI: Card init - SDIO card\n'
+        DEBUGF  1,'SDHCI: SDIO card not supported. Power and clock stoped\n'
+        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
+        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
         ret
 .unknowe:
         and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
@@ -1100,8 +1109,11 @@ proc card_destryct
 
         call    del_card_disk
 .no_memory_card:
-        ;очищаем все регистры связанные с этим слотом
+        ;TODO: очищаем все регистры связанные с этим слотом
 
+        ;stop power and clock gen
+        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
+        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
         ret
 endp
 
@@ -1112,9 +1124,9 @@ endp
 proc sdhc_irq
         pusha
         mov     esi, [esp + 4 + 32] ;stdcall
-        DEBUGF  1,"SDHCI: get_irq \n"
+        ;DEBUGF  1,"SDHCI: get_irq \n"
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
-        DEBUGF  1,"SLOT_INTRPT: %x \n", [eax + SLOT_INTRPT]
+        DEBUGF  1,"SDHCI: INTRPT: %x \n", [eax + SLOT_INTRPT]
         DEBUGF  1,"SLOT_INT_STATUS: %x \n",[eax + SDHC_INT_STATUS]
         cmp    dword[eax + SDHC_INT_STATUS], 0
         jz      .fail
@@ -1159,34 +1171,9 @@ proc sdhc_irq
         mov     dword[esi + SDHCI_CONTROLLER.int_status], ecx
         mov     [eax + SDHC_INT_STATUS], ecx ; гасим прерывания
 
-
-;        test    dword[eax + SDHC_INT_STATUS], 0x01 ; check zero bit -  Command Complete
-;        jz      .no_command_complate
-;
-;        or      dword[eax + SDHC_INT_STATUS], 0x01
-;        DEBUGF  1,"Get Command Complete\n"
-;        and     [esi + SDHCI_CONTROLLER.flag_command_copmlate], 0x00  ; TODO: поменять на норм флаги
-;.no_command_complate:
-;        test    dword[eax + SDHC_INT_STATUS], 0x02
-;        jz      .no_transfer_commplate
-;
-;        or      dword[eax + SDHC_INT_STATUS], 0x02
-;        DEBUGF  1,"Get transfer complete\n"
-;        and     [esi + SDHCI_CONTROLLER.flag_transfer_copmlate], 0x00
-;.no_transfer_commplate:
-;
-;        test    dword[eax + SDHC_INT_STATUS], 0x8000 ; 15 bit
-;        jnz      .get_error
-
         popa
         xor     eax, eax
         ret
-;.get_error:
-;        DEBUGF  1,"SDHCI: get error irq,  \n"
-;
-;        popa
-;        xor     eax, eax
-;        ret
 .fail:
         popa
         xor     eax, eax
@@ -1197,12 +1184,25 @@ proc sdhc_irq
         rd     5
 endp
 
-proc add_card_disk
-
-        ret
-endp
-proc del_card_disk
-
+; get voltage mask for ACMD41 and CMD5
+; IN: ebx - base data for OCR  esi,eax -standart fo this driver
+; OUT: ebx - OCR
+;      ZF - error mask(ebx[23:0]=0)
+proc    get_ocr_mask
+        or      ebx, [esi + SDHCI_CONTROLLER.card_reg_ocr] ; set mask sd card
+        cmp     byte[eax + 0x29], 1011b ;1.8
+        jnz     @f
+        and     ebx, (1 shl 30) + 0x80 ; see OCR reg
+@@:
+        cmp     byte[eax + 0x29], 1101b ;3.0
+        jnz     @f
+        and     ebx, (1 shl 30) + (1 shl 17) ; see OCR reg
+@@:
+        cmp     byte[eax + 0x29], 1111b ;1.8
+        jnz     @f
+        and     ebx, (1 shl 30) + (1 shl 20) ; see OCR reg
+@@:
+        test    ebx, 0xffffff
         ret
 endp
 
@@ -1216,9 +1216,6 @@ proc service_proc stdcall, ioctl:dword
 endp
 
 drv_name:       db 'SDHCI',0
-
-sdcard_disk_name:       db 'sdcard00',0
-mmccard_disk_name:      db 'MMCcard00',0
 
 ;base_reg_map:   dd 0;pointer on base registers comntroller
 

@@ -1,0 +1,6 @@
+Äכÿ ןנמדנאלל:
+ - get_card_registers(void* controller)
+ - set_power (void* controller)
+ - set_card_clock (void* controller)
+ - set_width_card(void* controller)
+ -

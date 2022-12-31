@@ -72,7 +72,17 @@ RESP_TYPE:
 ;  28-30  |  Number of I/O Functions   ;  <- не включаем общую область функции 0 (подробнее в SDIO спеке)
 ;    31   |  Card power up status bit  ; (busy)
 ;--------------------------------------;
-; CID register
+;           CID register
+;   bit   | width |  data                      ;
+;---------|-------|----------------------------;
+;  0-11   |  12   | Manufacturing date(MDT)    ;  <- [0-3] month code(1=january) [4-11] year-2000
+; 12-15   |  4    | reserved                   ;
+; 16-47   |  32   | Product Serial Number(PSN) ;
+; 48-55   |  8    | Product Revision(PRV)      ;  <- BCD number
+; 56-95   |  40   | Product name(PRN)          ;
+; 96-111  |  16   | OEM/Aplication ID (OID)    ;
+; 112-119 |  8    | Manufacturer ID (MID)      ;
+;----------------------------------------------;
 ;
 
 R1_APP_CMD = 100000b ; карта ожидает ACMD команду
@@ -159,13 +169,16 @@ endp
 ; вернёт тоже самое(ну или же своё поддерживаемое напряжение(нет)) в ответе, если нет,
 ; то ошибка таймаут
 proc    SEND_IF_COUND
+        mov     ebx, (0001b shl 8) + 10101010b
 
-        mov     ebx, (0001b shl 8) + 10101010b   ;0001b - уровень напряжения, см спеку физического
-                                                 ;уровня, стр 51. 2.7V-3.6V=0001b 1.8V=0010b
+        cmp     byte[eax + 0x29],1011b
+        jnz     @f
+        mov     ebx, (0010b shl 8) + 10101010b   ;0001b - уровень напряжения, см спеку физического
+@@:                                              ;уровня, стр 51. 2.7V-3.6V=0001b 1.8V=0010b
         mov     ecx, 0x00;0x02 ; read mull
         mov     edx, (8 shl 8) + RESP_TYPE.R7 ;01000b + 11b
         call    send_sdhc_command
-        cmp     word[eax + SDHC_RESP1_0], (0001b shl 8) + 10101010b
+        cmp     word[eax + SDHC_RESP1_0], bx;(0001b shl 8) + 10101010b
         ret
 endp
 
@@ -173,7 +186,22 @@ endp
 ;resp = R2
 ;args = [16:31]RCA card
 proc    SEND_CSD
-
+        DEBUGF  1,"SDHCI: get CSD reg\n"
+        mov     bx, word[esi + SDHCI_CONTROLLER.card_reg_rca]
+        shl     ebx, 16
+        mov     ecx, 0x00;0x02 ; read mull
+        mov     edx, (9 shl 8) + RESP_TYPE.R2 ;01000b + 01b
+        call    send_sdhc_command
+        ; save CID
+        mov     ecx, [eax + SDHC_RESP1_0]
+        mov     ebx, [eax + SDHC_RESP3_2]
+        mov     edx, [eax + SDHC_RESP5_4]
+        mov     edi, [eax + SDHC_RESP7_6]
+        mov     [esi + SDHCI_CONTROLLER.card_reg_csd], ecx
+        mov     [esi + SDHCI_CONTROLLER.card_reg_csd + 4], ebx
+        mov     [esi + SDHCI_CONTROLLER.card_reg_csd + 8], edx
+        mov     [esi + SDHCI_CONTROLLER.card_reg_csd + 12], edi
+        DEBUGF  1,"SDHCI: resp3=%x resp4=%x \n", [eax + SDHC_RESP5_4], [eax + SDHC_RESP7_6]
         ret
 endp
 ;cmd55 = switch to ACMD mode command
@@ -255,6 +283,9 @@ proc   PROGRAM_CSD
     ret
 endp
 ; SDIO mode
+; Отличия от SD memory:
+; - CID регистр отсутствует
+; -
 
 ;cmd5 - как ACMD41 но только для SDIO
 ;arg = 0-31 - voltage mask, zero to check sdio
