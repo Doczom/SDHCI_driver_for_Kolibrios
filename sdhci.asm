@@ -15,10 +15,6 @@ use32
 ;  Driver for SD host controller ;
 ;                                ;
 ;;;                            ;;;
-; это драйвер для работы с файлами на sd картах и возможно для ещё чего-то
-; при инициализации драйвер находит контроллер проверяет его состояние
-; назначает ему обработчик прерываний, активация которого сигнализирует вроде как
-; подключение или отключение карты
         DEBUG                   = 1
         __DEBUG__               = 1
         __DEBUG_LEVEL__         = 1             ; 1 = verbose, 2 = errors only
@@ -56,7 +52,7 @@ use32
 ;=====
 ; Как я понимаю значение этого регистра: адрес на область физ памяти на некое кол-во байт
 ; его должен устанавливать драйвер перед каждой операцией sdma
-SDHC_SYS_ADDR   = 0x00 ;32bit block Count(SDMA System Address)
+SDHC_SYS_ADDR   = 0x00 ;32bit SDMA System Address
 ;В этом регистре содержится 3 значения.
 ;0-11 Transfer Block Size
 ; Этот регистр определяет размер блока передачи данных для CMD17, CMD18, CMD24, CMD25, CMD35.
@@ -87,8 +83,6 @@ SDHX_BLK_CS     = 0x04
   _16bit_block_count_register = 0x06 ;word
 ; Аргумент SD команды, подробнее в специфиации физического уровня
 SDHC_CMD_ARG    = 0x08 ; dword
-  ARGUMENT0     = 0x08 ; word
-  ARGUMENT1     = 0x0A ; word
 ; Transfer Mode Register
 ;   Этот регистр используется для контроля операций передачи данных.Драйвер должен установить этот регистр
 ; перед выполнением команды с передачей данных(смотрет Data Pressent Select в Command регистре), или перед
@@ -522,7 +516,6 @@ SDHC_ADMA_ERR   = 0x54
   ADMA_error_status = 0x54 ; byte (using 0-2 bits)
 
 SDHC_ADMA_SAD   = 0x58
-  ADMA_system_addres_register = 0x58 ;qword
 
 ;0x60-0x6f - Preset Value ;spec version 3
 
@@ -600,6 +593,8 @@ struct  SDHCI_CONTROLLER
         card_reg_scr    rd 2 ; 64 bits
         card_reg_ssr    rd 16 ; 512bit
 
+        sector_count    rq 1  ; count rw sectors on SD\SDIO\MMC card
+
         program_id      rd 1 ; tid thread for working with no memory cards
 
         flag_command_copmlate rd 1 ; flag interrapt command complate 00 - interrapt is geting
@@ -608,6 +603,7 @@ struct  SDHCI_CONTROLLER
                         rd 4 ; reserved
         status_control  rd 1 ; flags status controller(0x01 - get irq AND int_status good)
                              ; status for write\read  disk, global flags
+
 ends
 
 struct  SDHCI_SLOT
@@ -867,11 +863,6 @@ proc sdhci_init
         DEBUGF  1,'400KHz : %u\n', edi
 
         pop     eax
-        ; Настроить маску прерываний TODO: переделать, в соответствии с режимом DMA
-        ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-        or      dword[eax + SDHC_INT_MASK], 0x40 or 0x80
-        or      word[eax + SDHC_SOG_MASK], 0x40 or 0x80
-        DEBUGF  1,'SDHCI: Set maximum int mask and mask signal\n'
         ; Установить значения в Host Control Register
         ; на этом вроде настройка завершина
 
@@ -879,25 +870,23 @@ proc sdhci_init
         ;установить значения в host control 2
         ;set 0x2e
 
-        ;test
         mov     dword[eax + SDHC_INT_STATUS], 0x00
 
         ; set Wekeup_control
         or      byte[Wekeup_control], 111b
+
         ; save and attach IRQ
         invoke  PciRead8, dword [esi + SDHCI_CONTROLLER.bus], dword [esi + SDHCI_CONTROLLER.dev], PCI_IRQ_LINE ;al=irq
-        ;DEBUGF  1,'Attaching to IRQ %x\n',al
         movzx   eax, al
-
-        ;invoke  PciWrite16, [esi + SDHCI_CONTROLLER.bus], [esi + SDHCI_CONTROLLER.dev], dword 0x82, 0x0000
-        ; disable smi ;SD_PCI_MSI_CTRL- RW - 16bits - [SD_PCI_CFG: 82h]
-
-        ;attach interrupt
         mov     [esi + SDHCI_CONTROLLER.irq_line], eax ;save irq line
-        invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller
+        invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller struct
+        mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
+        or      dword[eax + SDHC_INT_MASK], 0x40 or 0x80
+        or      word[eax + SDHC_SOG_MASK], 0x40 or 0x80
+        DEBUGF  1,'SDHCI: Enable insert and remove interrupt\n'
 
         ; Детектим карты
-        mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
+        ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
         test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
         jz      @f
         call    card_detect ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
@@ -983,23 +972,15 @@ proc card_init
         call    IO_SEND_OP_COND; 0 - test voltage mask to check SDIO interface, ZF=1-sdio
         jz      .sdio
 
-        ; acmd41 voltage window = 0
-        DEBUGF  1,"SDHCI: ACMD41 - get OCR\n"
-        call    SD_SEND_OP_COND
-        jnz     .mmc ; if error command
-
-        ; cmd8 - проверка напряжения   начиная со второй спецификации
-        DEBUGF  1,"SDHCI: CMD8 - check SDHC card\n"
+        ;DEBUGF  1,"SDHCI: CMD8 - check SDHC card\n"
         call    SEND_IF_COUND
-        mov     ebx, 0 ; no set EFLAGS
-        ;if card supported 2 spec,  acmd41 + set hsp=1
-        jnz     @f
-        mov     ebx, 1 shl 30 ; set HSP
-@@:
-        call    get_ocr_mask
-        jz      .err
+        ;DEBUGF  1,"SDHCI: ACMD41 - get OCR\n"
+        mov     [esi + SDHCI_CONTROLLER.card_reg_ocr], 1 shl 30 ; set HSP
 .set_acmd41:
+        ; TODO: Добавить задержку на 10мс, как в embox
+        call    get_ocr_mask
         ; acmd41  - с нужной маской вольтажа
+        ; первый вызов возвращает OCR, следующие устанавливают вольтаж
         call    SD_SEND_OP_COND
         jnz     .mmc
         test    dword[eax + SDHC_RESP1_0], 0x80000000 ; check 31 bit
@@ -1009,10 +990,58 @@ proc card_init
                                ; правильной проверки irq всё виснит
         ; for all init card : cmd3 - get RCA
         call    SEND_RCA
-
-        ;TODO: get CSD register
+        ; get CSD register
         call    SEND_CSD
+
+        ; send CMD7
+        call    SELECT_CARD
+
+        test    [esi + SDHCI_CONTROLLER.card_reg_ocr], 0x40000000
+        jnz     @f
+
+        ;send CMD 16
+        mov     ebx, 0x200 ; 512 byte
+        call    SET_BLOCKLEN
+@@:
+
+        ; get size device
+        test    dword[esi + SDHCI_CONTROLLER.card_reg_csd + 12], 0x400000  ;check version SCD ver2
+        jz      @f
+
+        call    GET_SDHC_SIZE
+        jmp     .end_get_size
+@@:
+        test    dword[esi + SDHCI_CONTROLLER.card_reg_csd + 12], 0x800000  ;check version SCD ver3
+        jz      @f
+
+        call    GET_SDUC_SIZE
+        jmp     .end_get_size
+@@:
+        test    dword[esi + SDHCI_CONTROLLER.card_reg_csd + 12], 0xC00000  ;check version SCD ver3
+        jnz     .err ; no get size device
+
+        call    GET_SDSC_SIZE
+
+.end_get_size:
+        DEBUGF  1,"SDHCI: Sectors card = %d:%d\n",[esi + SDHCI_CONTROLLER.sector_count + 4],\
+                                                  [esi + SDHCI_CONTROLLER.sector_count]
+        DEBUGF  1,"SDHCI: TEST1 SDMA - read first sector\n"
+        call    TEST_SDMA_R
+
+        DEBUGF  1,"SDHCI: TEST2 SDMA - read first sector\n"
+        call    TEST_SDMA_R_MUL
+
+        ; Инициализация карты завершена. Изменение настроек интерфейса
+        ; set 4bit mode else card and controler suppoted it mode.
+
+        ; set bus speed mode
+
+        ; set new clock. до 50 МГц
+
+
+
         ;TODO: get SCR register
+
         mov     ebx, 2
         ret
 .sdio:
@@ -1027,10 +1056,6 @@ proc card_init
         jz      @b
 
         call    SEND_RCA
-
-        ;TODO: get CSD register
-        call    SEND_CSD
-        ;TODO: get SCR register
 
         mov     ebx, 1
         ret
@@ -1050,31 +1075,23 @@ endp
 
 proc thread_card_detect
         ;get event with data
-        invoke  Kmalloc, 6*4  ; 6*Dword
-        test    eax, eax
-        jz      .no_malloc
-        mov     edi, eax
-        push    edi
+        sub      esp, 6*4  ; 6*Dword
+        mov      edi, esp
         invoke  GetEvent
-        pop     edi
+        mov     edi, esp
         ;DEBUGF  1,'SDHCI: Get event code=%x [edi + 4]=%x, [edi + 8]=%x\n', [edi], [edi + 4], [edi + 8]
-        push    dword[edi + 4] ; reg map
-        push    dword[edi + 8] ;controller struct
-        mov     eax, edi
-        invoke  Kfree
-        pop     esi
-        pop     eax
+        mov     eax, dword[edi + 4] ; reg map
+        mov     esi, dword[edi + 8] ;controller struct
+
         call    card_detect
-.no_malloc:
         ; destryct thread
         mov     eax, -1
         int     0x40
 endp
 
 proc card_detect
-        ;DEBUGF  1,'SDHCI: eax=%x esi=%x\n', eax, esi
         DEBUGF  1,'SDHCI: Card inserted\n'
-        call    card_init                 ; TODO: get CSD and SRC registers + get SSR register
+        call    card_init                 ; TODO: get SRC registers + get SSR register
         mov     [esi + SDHCI_CONTROLLER.type_card], ebx
         test    ebx, ebx
         jz      .unknowe
@@ -1083,7 +1100,10 @@ proc card_detect
         ; Если это карта памяти(SD memory, eMMC, SPI), то добавляем диск, else set flag SDIO device
         ; сохраняем все настройки и состояния процедур
 .memory_card:
-        call    add_card_disk
+
+
+
+        ;call    add_card_disk
         DEBUGF  1,'SDHCI: Card init - Memory card\n'
         ret
 .SDIO:
@@ -1101,7 +1121,7 @@ proc card_detect
         ret
 endp
 
-proc card_destryct
+proc card_destruct
         DEBUGF  1,'SDHCI: Card removed\n'
         ; удаляем диск из списка дисков если это диск
         test    ebx, 110b
@@ -1158,19 +1178,23 @@ proc sdhc_irq
         ;DEBUGF  1,"SDHCI: Evend sended, eax=%x uid=%x \n", eax, ebx
         pop     eax
         pop     esi
+        jmp     .exit
+
 .no_card_inserted:
         test    dword[eax + SDHC_INT_STATUS], 0x80
         jz      .no_card_removed
 
         or      dword[eax + SDHC_INT_STATUS], 0x80
-        call    card_destryct
+        call    card_destruct
+        jmp     .exit
+
 .no_card_removed:
 
 
         mov     ecx, [eax + SDHC_INT_STATUS]
         mov     dword[esi + SDHCI_CONTROLLER.int_status], ecx
         mov     [eax + SDHC_INT_STATUS], ecx ; гасим прерывания
-
+.exit:
         popa
         xor     eax, eax
         ret
@@ -1206,21 +1230,137 @@ proc    get_ocr_mask
         ret
 endp
 
+proc  TEST_SDMA_R
+        or      dword[eax + SDHC_INT_MASK], 0xFFFFFFFF
+        or      dword[eax + SDHC_SOG_MASK], 0xFFFFFFFF
+        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+        mov     byte[eax + 0x2E], 1110b ; set max
+        mov     ebp, eax
+        invoke  KernelAlloc, 4096
+        push    eax
+        invoke  GetPhysAddr ; arg = eax
+        xchg    eax, ebp
+        mov     dword[eax], ebp;phys addr
+        mov     dword[eax + 4], SD_BLOCK_SIZE
+        ;(block_count shl) 16  + (sdma_buffer_boundary shl 12) + block_size
+        mov     dword[eax + 8], 0 ; arg - num sector
+        mov     dword[eax + 0xC], (((17 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + 010001b
+@@:
+        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+        hlt
+        jz      @b
+        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+.wait_int:
+        mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
+        hlt
+        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+        jz      .wait_int
+        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+        pop     ebp
+        test    dword[eax + SDHC_RESP1_0], 0x8000
+        jnz     @f
+        push    eax
+        mov     dword[.ptr], ebp
+        mov     ebx, .file_struct
+        invoke  FS_Service
+        pop     eax
+@@:
+        ret
+.file_struct:
+        dd 2
+        dd 0
+        dd 0
+        dd 512
+.ptr:   dd 0
+        db '/tmp0/1/dump_first_sector',0
+
+endp
+
+;   Заметка к SDMA: Прерывание DMA возникает только при пересечении границы блока данных
+; у меня это граница в 4кб
+proc  TEST_SDMA_R_MUL
+        or      dword[eax + SDHC_INT_MASK], 0xFFFFFFFF
+        or      dword[eax + SDHC_SOG_MASK], 0xFFFFFFFF
+        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+        mov     byte[eax + 0x2E], 1110b ; set max
+        mov     ebp, eax
+        invoke  KernelAlloc, 4096*0x800;128;4096*512
+        push    eax
+        push    eax
+        invoke  GetPhysAddr ; arg = eax
+        xchg    eax, ebp
+        mov     dword[eax], ebp;phys addr
+        mov     dword[eax + 4], ((8*0x800) shl 16) +  SD_BLOCK_SIZE
+        ;(block_count shl) 16  + (sdma_buffer_boundary shl 12) + block_size
+        mov     dword[eax + 8], 0;0x2000 ; arg - num sector
+        mov     dword[eax + 0xC], (((18 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + CMD_TYPE.Multiple + 10101b
+@@:
+        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+        hlt
+        jz      @b
+        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+.wait_int:
+        mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
+        hlt
+        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+        jz      .wait_int
+        test    dword[esi + SDHCI_CONTROLLER.int_status], 10b
+        jnz     @f
+        test    dword[esi + SDHCI_CONTROLLER.int_status], 1000b
+        jz      @f
+
+        xchg    eax, ebp
+        mov     eax, dword[esp]
+        add     eax, 4096
+        mov     dword[esp], eax
+        invoke  GetPhysAddr
+        xchg    eax, ebp
+        mov     dword[eax], ebp;phys addr
+
+        jmp     .wait_int
+
+        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+@@:
+        pop     ebp
+        pop     ebp
+        test    dword[eax + SDHC_RESP1_0], 0x8000
+        jnz     @f
+        push    eax
+        mov     dword[.ptr], ebp
+        mov     ebx, .file_struct
+        invoke  FS_Service
+        pop     eax
+@@:
+        ret
+.file_struct:
+        dd 2
+        dd 0
+        dd 0
+        dd 4096*0x800;128
+.ptr:   dd 0
+        db '/tmp0/1/dump_first_sector_mul',0
+
+endp
 
 
 ; This function for working drivers and programs worked
 ; with SDIO interface.
 proc service_proc stdcall, ioctl:dword
-
+        ; 0 - get version
+        ; 1 - get card count
+        ; 2 - get card (hand + info(CID, CSD, RCA, OCR))
+        ; 3 - set card width
+        ; 4 - set card clock
+        ; 5 - set DMA mode
+        ; 6 - set card irq hand (for SDIO)
+        ; 7 - look access card
+        ; 8 - unlook access card
+        ; 9 - call card func (for SDIO)
+        ; 10 - capturing control controller
         ret
 endp
 
 drv_name:       db 'SDHCI',0
-
-;base_reg_map:   dd 0;pointer on base registers comntroller
-
-;SDMA_sys_addr: dq 0;  [base_sdhc_reg]+offset(0x00 or 0x58-0x5f) 32 or 64 bit
-;pt_call_command: dd 0; noDMA or DMA function
 
 align 4
 data fixups

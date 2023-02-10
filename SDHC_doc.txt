@@ -1,0 +1,164 @@
+; Регистры контроллера
+
+; Response Bit Definition and Each Response type
+;  R1,R1b (normal response)    - Card Status                  - REP[0:31]
+;  R1b (Auto CMD12 response)   - Card Status for Auto CMD12   - REP[96:127]
+;  R1 (Auto CMD23 response)    - Card Status for Auto CMD23   - REP[96:127]
+;  R2 (CID, CSD register)      - CID or CSD reg. incl.        - REP[0:119]
+;  R3 (OCR register)           - OCR register for memory      - REP[0:31]
+;  R4 (OCR register)           - OCR register for I/O etc     - REP[0:31]
+;  R5, R5b                     - SDIO response                - REP[0:31]
+;  R6 (Published RCA response) - New published RCA[16:31] etc - REP[0:31]
+;  R7 (return CMD8)            - Voltage flags + mask protect - REP[0:31]
+
+
+
+; Регистры SD/SDIO/MMC карт и прочее
+
+;      OCR register
+;   bit   |  data
+;---------|----------------------------;
+;   0-6   |  reserved                  ;
+;    7    |  Low Voltage Range (1.8V)  ;
+;   8-14  |  reserved                  ;
+;    15   |  2.7 - 2.8V                ;
+;    16   |  2.8 - 2.9V                ;
+;    17   |  2.9 - 3.0V                ;
+;    18   |  3.0 - 3.1V                ;
+;    19   |  3.1 - 3.2V                ;
+;    20   |  3.2 - 3.3V                ;
+;    21   |  3.3 - 3.4V                ;
+;    22   |  3.4 - 3.5V                ;
+;    23   |  3.5 - 3.6V                ;
+;    24   |  reserved                  ;  <- only to UHS-I "switching to 1.8 Accepted (S18A)"
+;  25-26  |  reserved                  ;
+;    27   |  reserved                  ;  <- only to SDUC "Over to 2TB support Status (CO2T)"
+;    28   |  reserved                  ;
+;    29   |  reserved                  ;  <- UHS-II Card Status
+;    30   |  Card Capacity Status(CCS) ;
+;    31   |  Card power up status bit  ; (busy)
+;--------------------------------------;
+
+;     I/O OCR register
+;   bit   |  data
+;---------|----------------------------;
+;   0-7   |  reserved                  ;
+;    8    |  2.0 - 2.1V                ;
+;    9    |  2.1 - 2.2V                ;
+;    10   |  2.2 - 2.3V                ;
+;    11   |  2.3 - 2.4V                ;
+;    12   |  2.4 - 2.5V                ;
+;    13   |  2.5 - 2.6V                ;
+;    11   |  2.6 - 2.7V                ;
+;    15   |  2.7 - 2.8V                ;
+;    16   |  2.8 - 2.9V                ;
+;    17   |  2.9 - 3.0V                ;
+;    18   |  3.0 - 3.1V                ;
+;    19   |  3.1 - 3.2V                ;
+;    20   |  3.2 - 3.3V                ;
+;    21   |  3.3 - 3.4V                ;
+;    22   |  3.4 - 3.5V                ;
+;    23   |  3.5 - 3.6V                ;
+;    24   |  switching to 1.8 Accepted ;  <- "switching to 1.8 Accepted (S18A)"
+;  25-26  |  reserved                  ;
+;    27   |  Memory Present            ;  <- 1 усли карта содержит SD память, 0 если только I/O
+;  28-30  |  Number of I/O Functions   ;  <- не включаем общую область функции 0 (подробнее в SDIO спеке)
+;    31   |  Card power up status bit  ; (busy)
+;--------------------------------------;
+;           CID register
+;   bit   | width |  data                      ;
+;---------|-------|----------------------------;
+;  0-11   |  12   | Manufacturing date(MDT)    ;  <- [0-3] month code(1=january) [4-11] year-2000
+; 12-15   |  4    | reserved                   ;
+; 16-47   |  32   | Product Serial Number(PSN) ;
+; 48-55   |  8    | Product Revision(PRV)      ;  <- BCD number
+; 56-95   |  40   | Product name(PRN)          ;
+; 96-111  |  16   | OEM/Aplication ID (OID)    ;
+; 112-119 |  8    | Manufacturer ID (MID)      ;
+;----------------------------------------------;
+;                                   CSD register ver 1.0
+;   bit   | width |        value       |  data                                               ;
+;---------|-------|--------------------|-----------------------------------------------------;
+;  0-1    |  2    |  00b               | reserved                                            ;
+;  2-3    |  2    |  xxb               | File Format(FILE_FORMAT)                            ;
+;   4     |  1    |  xb                | temporary write protection  TMP_WRITE_PROTECT       ;
+;   5     |  1    |  xb                | permanent write protection  PERM_WRITE_PROTECT      ;
+;   6     |  1    |  xb                | copy flag  COPY                                     ;
+;   7     |  1    |  xb                | file format group (FILE_FORMAT_GRP)                 ;
+;  8-12   |  5    |  00000b            | reserved                                            ;
+;   13    |  1    |  xb                | partial blocks for write allowed (WRITE_BL_PARTIAL) ;
+; 14-17   |  4    |  xxxxb             | max. write data block length  (WRITE_BL_LEN)        ;  размер сектора на чтение и запись
+; 18-20   |  3    |  xxxb              | write speed factor (R2W_FACTOR)                     ;
+; 21-22   |  2    |  00b               | reserved                                            ;
+;   23    |  1    |  xb                | write protect group enable (WP_GRP_ENABLE)          ;
+; 24-30   |  7    |  xxxxxxxb          | write protect group size  (WP_GRP_SIZE)             ;
+; 31-37   |  7    |  xxxxxxxb          | erase sector size (SECTOR_SIZE)                     ;
+;   38    |  1    |  xb                | erase single block enable  (ERASW_BLK_EN)           ;
+; 39-41   |  3    |  xxxb              | device size multiplier C_SIZE_MULT                  ;
+; 42-44   |  3    |  xxxb              | VDD_W_CURR_MAX                                      ;
+; 45-47   |  3    |  xxxb              | VDD_W_CURR_MIN                                      ;
+; 48-50   |  3    |  xxxb              | VDD_R_CURR_MAX                                      ;
+; 51-53   |  3    |  xxxb              | VDD_R_CURR_MIN                                      ;
+; 54-65   |  12   |  xxxh              | device size  C_SIZE                                 ;
+; 66-67   |  2    |  00b               | reserved                                            ;
+;   68    |  1    |  xb                | DSR implemented  DSR_IMP                            ; если или нету DSR регистр
+;   69    |  1    |  xb                | read block misalignment (READ_BLK_MISALIGN)         ; возможно ли пересечение блока данных с другими на физ уровне
+;   70    |  1    |  xb                | write block misalignment (WRITE_BLK_MISALIGN)       ;   0 - нет 1 - да
+;   71    |  1    |  1b                | partial blocks for read allowed  (READ_BL_PARTIAL)  ; всегда 1. можно читать меньше чем блок
+; 72-75   |  4    |  xh                | max. read data block length  (READ_BL_LEN)          ; размер сектора на чтение и запись
+; 76-87   |  12   |  01x110110101b     | card command classes CCC                            ;
+; 88-95   |  8    | 32h,5Ah            | max. data transfer rate  (TRAN_SPEED)               ;
+; 96-103  |  8    | xxh                | data read access-time in CLK cycles(MSAC*100)  NSAC);
+; 104-111 |  8    | xxh                | data read access-time  (TAAC)                       ;
+; 112-117 |  6    | 00 0000b           | reserved                                            ;
+; 118-119 |  2    | 00b                | CSD structure  CSD_STRUCTURE                        ;
+;--------------------------------------------------------------------------------------------;
+;                                   CSD register ver 2.0
+;   bit   | width |        value       |  data                                               ;
+;---------|-------|--------------------|-----------------------------------------------------;
+;  0-1    |  2    |  00b               | reserved                                            ;
+;  2-3    |  2    |  00b               | File Format(FILE_FORMAT)                            ;
+;   4     |  1    |  x                 | temporary write protection  TMP_WRITE_PROTECT       ;
+;   5     |  1    |  x                 | permanent write protection  PERM_WRITE_PROTECT      ;
+;   6     |  1    |  x                 | copy flag  COPY                                     ;
+;   7     |  1    |  0                 | file format group (FILE_FORMAT_GRP)                 ;
+;  8-12   |  5    |  00000b            | reserved                                            ;
+;   13    |  1    |  0                 | partial blocks for write allowed (WRITE_BL_PARTIAL) ;
+; 14-17   |  4    |  9                 | max. write data block length  (WRITE_BL_LEN)        ;  размер сектора на чтение и запись
+; 18-20   |  3    |  010b              | write speed factor (R2W_FACTOR)                     ;
+; 21-22   |  2    |  00b               | reserved                                            ;
+;   23    |  1    |  0                 | write protect group enable (WP_GRP_ENABLE)          ;
+; 24-30   |  7    |  0000000b          | write protect group size  (WP_GRP_SIZE)             ;
+; 31-37   |  7    |  7Fh               | erase sector size (SECTOR_SIZE)                     ;
+;   38    |  1    |  1                 | erase single block enable  (ERASW_BLK_EN)           ;
+;   39    |  1    |  0                 | reserved                                            ;
+; 40-61   |  22   |  xxxxxxh           | device size  C_SIZE                                 ;
+; 62-67   |  6    |  00 0000b          | reserved                                            ;
+;   68    |  1    |  x                 | DSR implemented  DSR_IMP                            ; если или нету DSR регистр
+;   69    |  1    |  0                 | read block misalignment (READ_BLK_MISALIGN)         ; возможно ли пересечение блока данных с другими на физ уровне
+;   70    |  1    |  0                 | write block misalignment (WRITE_BLK_MISALIGN)       ;   0 - нет 1 - да
+;   71    |  1    |  0                 | partial blocks for read allowed  (READ_BL_PARTIAL)  ; всегда 1. можно читать меньше чем блок
+; 72-75   |  4    |  9                 | max. read data block length  (READ_BL_LEN)          ; размер сектора на чтение и запись
+; 76-87   |  12   |  01x110110101b     | card command classes CCC                            ;
+; 88-95   |  8    | 32h,5Ah,0Bh or 2Bh | max. data transfer rate  (TRAN_SPEED)               ;
+; 96-103  |  8    | 00h                | data read access-time in CLK cycles(MSAC*100)  NSAC);
+; 104-111 |  8    | 0Eh                | data read access-time  (TAAC)                       ;
+; 112-117 |  6    | 00 0000b           | reserved                                            ;
+; 118-119 |  2    | 01b                | CSD structure  CSD_STRUCTURE                        ;
+;--------------------------------------------------------------------------------------------;
+;
+; for version struct 1.0
+;  memory capacity = BLOCKNR * BLOCK_LEN
+;  BLOCKNR = (C_SIZE + 1) * MULT
+;  MULT = 2^(C_SIZE_MULT + 2)
+; for version struct 2.0
+;  memory capacity = (C_SIZE + 1) * 512 KByte
+
+
+; Алгоритмы
+
+
+; это драйвер для работы с файлами на sd картах и возможно для ещё чего-то
+; при инициализации драйвер находит контроллер проверяет его состояние
+; назначает ему обработчик прерываний, активация которого сигнализирует вроде как
+; подключение или отключение карты
