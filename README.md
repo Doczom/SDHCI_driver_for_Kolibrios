@@ -9,25 +9,34 @@ The driver is being developed and tested for the controller version 2.0 (integra
 
 Version controller:
 - 1.0 - no supported
-- 2.0 - supported 
+- 2.0 - Supported 
 - 3.0 - no supported
 - 4.0 - no supported
 
+DMA modes:
+- no-DMA - not supported
+- SDMA   - Supported
+- ADMA1  - not supported
+- ADMA2 32bit - not supported
+- ADMA2 64bit - not supported
+
+
 Version OS: 
-* rev 9764
+* rev 9897
 
 Bus protocol:
-- SD Bus protocol - supported
+- SD Bus protocol - Supported
 - SPI Bus protocol - no supported
 - UHS-II Bus protocol - no supported
 - PCIe/NVMe Bus protocol - no supported
 
-TODO:
+## TODO:
 - инициализация контроллера, вывод информации об контроллере
 - Установка изначальных значений для работы контроллера
 - ~~регистрация обработчика прерываний~~
 - документирование и реализация команд контроллера
 - ~~написание алгоритма инициализации SD карт~~
+- переписать обнаружение карт при инициализации контроллера
 - написание алгоритма инициализации SDIO карт
 - написание алгоритма инициализации MMC карт
 - написание функций передачи блоков через SDMA и ADMA и без применения DMA
