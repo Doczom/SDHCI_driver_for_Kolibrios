@@ -2,36 +2,30 @@
 ;; SDHC commands
 
 RESP_TYPE:
-        .not = 00000b + 00b
-        .R1  = 11000b + 10b
-        .R1b = 11000b + 11b
-        .R2  = 01000b + 01b
-        .R3  = 00000b + 10b
+        .not = (00000b + 00b)
+        .R1  = (11000b + 10b)
+        .R1b = (11000b + 11b)
+        .R2  = (01000b + 01b)
+        .R3  = (00000b + 10b)
         .R4  = .R3
         .R5  = .R1
         .R5b = .R1b
         .R6  = .R1
         .R7  = .R1
 
-CMD_TYPE:     ; 6-7 bits
+CMD_TYPE:     ; 6-7 bits  for 0x0E
         .Normal  = 00000000b ; other command
         .Suspend = 10000000b ; CMD12, CMD52 for writing "Bus Suspend" in CCCR
         .Resume  = 01000000b ; CMD52 for writing "Function Select" in CCCR
         .Abort   = 11000000b ; CMD52 for writing "I/O Abort" in CCCR
-        ; for 0xc
+        ; for 0x0C
         .Single   = 000000b
         .Multiple = 100010b
         .Infinite = 100000b
+        .Write    =  00000b
+        .Read     =  10000b
 
-DATA_PRSNT = 100000b ; set for using DAT line for transfer
-
-;Transfer_type:
-;        .Single   = 000000b
-;        .Multiple = 100010b
-;        .Infinite = 100000b
-DATA_DIR:
-        .Write = 00000b
-        .Read  = 10000b
+DATA_PRSNT = 100000b ; set for using DAT line for transfer reg 0x0C
 
 DMA_EN = 1b ; reg 0x0C
 ACMD12_EN = 100b ;send acmd12 for end transfer blocks
@@ -46,6 +40,7 @@ SD_BLOCK_SIZE = 0x200 ;standart sector = 512
 
 R1_APP_CMD = 100000b ; карта ожидает ACMD команду
 R1_READY_FOR_DATA = 100000000b ; 0x100 соответс€твует сигналу о пустом буфере на шине
+CMD55_VALID_RESP = R1_READY_FOR_DATA + R1_APP_CMD
 ; in: eax - reg map, esi - struct controller
 ;     ebx - arg 32 bit в готовом виде edx - 0x0C register ;command reg with flags
 proc  send_sdhc_command
@@ -59,75 +54,109 @@ proc  send_sdhc_command
 @@:
         hlt
         cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
-        ;hlt
         jz     @b
         DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
         ret
 endp
 
 ; in: eax - reg map, esi - struct controller
-;     ebx - arg 32 bit в готовом виде ecx - 0x0C register edx - command reg with flags
-proc  send_sdhc_transfer_command stdcall, arg:dword, _block_size:word, _block_count:word,\
-                                          reg0c:dword, virt_addr:dword, phys_addr:dword
+;     ebx - argument 32 bit  ecx - 0x0C register
+;     edx - (block_count shl 16) + block_size edi - virtual addr ; save in stack
+proc  send_sdhc_transfer_command
+        push    edx
+        push    edi
+        push    edi ; virt addr
+        sub     esp, 4 ; for save ADMA2\ADMA1 table
 @@:
         test    dword[eax + SDHC_PRSNT_STATE], 0x07
         jnz     @b ; check cmd_inhid_cmd + cmd_inhibit_dat + DAT Line Active
 
         ; (1) Set Block Size Reg
         ; (2) Set Block Count Reg
+        mov     dword[eax + SDHX_BLK_CS], edx
         ; (3) Set Argument Reg
+        mov     dword[eax + SDHC_CMD_ARG], ebx
+
+        ; set addr
+        mov     ebx, dword[eax + SDHC_CTRL1]
+        and     ebx, 0x18 ; 3-4 bits
+        cmp     ebx, DMA_SELECT.SDMA
+        jnz     @f
+
+        xchg    eax, edi
+        invoke  GetPhysAddr
+        xchg    eax, edi
+        mov     [eax + SDHC_SYS_ADDR], edi
+        jmp     .end_set_addr
+@@:
+        cmp     ebx, DMA_SELECT.ADMA2_32
+        jnz     .err ;  other DMA mods not supported
+
+        shr     edx, 16
+        call    create_adma2_table
+        mov     dword[eax + SDHC_ADMA_SAD], edi
+        mov     dword[esp], edi
+
+.end_set_addr:
+        mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
         ; (4) Set Transfer Mode Reg
         ; (5) Set Command Reg
-
+        mov     dword[eax + SDHC_CMD_TRN], ecx
 @@:
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
         hlt
+        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
         jz      @b
-        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
 
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0x01 ; comand complate
+        cmp     dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.CMD_DONE
         jnz     .err
-
-        ; wait interrupt
+        ; wait interrupt transfer
 .wait_int:
         mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
+@@:
         hlt
         cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
-        jz      .wait_int
+        jz      @b;.wait_int
 
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 1000b ; DMA intr
-        jnz     .no_sdma
-        ; set new addr
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.ERROR
+        jnz     .dat_err
+
+        test   dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.DAT_DONE ; Transfer complate
+        jnz     .good_transfer
+
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.DMA_EVT ; DMA intr
+        jz      .no_sdma
+        ; SDMA add addr and set new phys addr
+        and     dword[esp + 4], -4096
+        add     dword[esp + 4], 4096
+        mov     ecx, dword[esp + 4]
+        xchg    eax, ecx
+        invoke  GetPhysAddr
+        xchg    eax, ecx
+        mov     dword[eax + SDHC_SYS_ADDR], ecx
         jmp     .wait_int
 .no_sdma:
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 10000b ; port write
-        jnz     .no_w_port
-
-        ; get phys addr
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.BUF_WR_RDY ; port write
+        jz      .no_w_port
 
         jmp     .wait_int
 .no_w_port:
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 100000b ; port read
-        jnz     .no_r_port
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.BUF_RD_RDY ; port read
+        jz      .wait_int  ; undefined interrupt
 
-        ;
         mov     ecx, [eax + SDHC_BUFFER]
         jmp     .wait_int
-.no_w_port:
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 10b ; Transfer complate
-        jz      .good_transfer
-
-        cmp     dword[esi + SDHCI_CONTROLLER.int_status], (10b shl 8) shl 16 ; ADMA Error
-        jz      .adma_error
 
 .good_transfer:
         DEBUGF 1,"SDHCI: GOOD COMMAND\n"
+        add    esp, 4*4
         ret
-.undefined_err:
-        DEBUGF 1,"SDHCI: UNDEFINED ERROR\n"
-.adma_error:
+.dat_err:
+        DEBUGF 1,"SDHCI: ERROR CMD COMMAND\n"
+        add    esp, 4*4
+        ret
 .err:
-        DEBUGF 1,"SDHCI: ERROR TRANSFER COMMAND\n"
+        DEBUGF 1,"SDHCI: ERROR DAT COMMAND\n"
+        add    esp, 4*4
         ret
 endp
 
@@ -138,7 +167,6 @@ macro   GO_IDLE_SATTE {
         xor     ebx, ebx
         mov     edx, (RESP_TYPE.not) shl 16
         call    send_sdhc_command
-        ;ret
 }
 ;cmd2 - Asks any card to send the CID numbers on the CMD line
 ;resp = R2
@@ -157,7 +185,6 @@ macro   ALL_SEND_CID {
         mov     [esi + SDHCI_CONTROLLER.card_reg_cid + 8], edx
         mov     [esi + SDHCI_CONTROLLER.card_reg_cid + 12], edi
         DEBUGF  1,"SDHCI: resp3=%x resp4=%x \n", [eax + SDHC_RESP5_4], [eax + SDHC_RESP7_6]
-        ;ret
 }
 ;cmd3 - Ask the card to publish a new relative address(RCA)
 ;resp = R6
@@ -267,19 +294,25 @@ endp
 ;resp = R1
 ;args = [31:16]RCA [15:0]stuff bits
 ; команда сообщает карте, что сдудующа€ команда будет acmd
+;OUT:  ZF - good ; NO ZF - error timeout
 ; WARNING!!! ѕри отключении карты или других ошибках вызывает зависание
 proc    APP_CMD
         push    ecx edx ebx
+        dec     esp
+        mov     byte[esp], 0
 @@:
+        inc     byte[esp]
         mov     bx, word[esi + SDHCI_CONTROLLER.card_reg_rca]
         shl     ebx, 16
         mov     edx, ((55 shl 8) + RESP_TYPE.R1 ) shl 16
         call    send_sdhc_command
         ; тут как € понимаю надо провер€ть состо€ние
-        cmp     dword[eax + SDHC_RESP1_0], 0x120 ; из исходников embox, это 1 флага
-        jnz     @b                               ; по спеке(физ уровень, стр 63(74))
-                                                 ; это флаги APP_CMD и READY_FOR_DATA
-        ;TODO: сделать выход при ошибке!!!
+        cmp     dword[eax + SDHC_RESP1_0], CMD55_VALID_RESP
+        jz      .good                               ; по спеке(физ уровень, стр 63(74))
+        test    byte[esp], 0x80                     ; это флаги APP_CMD и READY_FOR_DATA
+        jz      @b
+.good:
+        lea     esp, [esp + 1]
         pop     ebx edx ecx
         ret
 endp
@@ -319,14 +352,35 @@ endp
 ;cmd17 -
 ;arg = 0-31 - data address
 ;resp = R1
+; IN: ebx - addr LBA
+;     edi - virt addr data
 proc    READ_SIGLE_BLOCK
-    ret
+        ; switch in SDMA mode
+        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+        mov     edx, SD_BLOCK_SIZE
+        mov     ecx, (((17 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + CMD_TYPE.Single \
+                                                                        + CMD_TYPE.Read \
+                                                                        + DMA_EN
+        call    send_sdhc_transfer_command
+        ret
 endp
 ;cmd18 -
 ;arg = 0-31 - data address
 ;resp = R1
+; IN: ebx - addr LBA
+;     edi - virt addr data
+;     edx - block count
 proc    READ_MULTIPLE_BLOCK
-    ret
+        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+        ; TODO: switch in ADMA2 mode
+        shl     edx, 16
+        add     edx, SD_BLOCK_SIZE
+        mov     ecx, (((18 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + CMD_TYPE.Multiple \
+                                                                        + CMD_TYPE.Read \
+                                                                        + ACMD12_EN \
+                                                                        + DMA_EN
+        call    send_sdhc_transfer_command
+        ret
 endp
 
 ; block write
@@ -334,36 +388,59 @@ endp
 ;cmd24 -
 ;arg = 0-31 - data address
 ;resp = R1
+; IN: ebx - addr LBA
+;     edi - virt addr data
 proc    WRITE_BLOCK
-    ret
+        ; switch in SDMA mode
+        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+        mov     edx, SD_BLOCK_SIZE
+        mov     ecx, (((24 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + CMD_TYPE.Single \
+                                                                        + CMD_TYPE.Read \
+                                                                        + DMA_EN
+        call    send_sdhc_transfer_command
+        ret
 endp
 ;cmd25 -
 ;arg = 0-31 - data address
 ;resp = R1
+; IN: ebx - addr LBA
+;     edi - virt addr data
+;     edx - block count
 proc    WRITE_MULTIPLE_BLOCK
-    ret
+        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+        ; TODO: switch in ADMA2 mode
+        shl     edx, 16
+        add     edx, SD_BLOCK_SIZE
+        mov     ecx, (((25 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + CMD_TYPE.Multiple \
+                                                                        + CMD_TYPE.Read \
+                                                                        + ACMD12_EN \
+                                                                        + DMA_EN
+        call    send_sdhc_transfer_command
+        ret
 endp
 ;cmd27 - Programming of the programmable bits of the CSD
 ;resp = R1
 ;proc   PROGRAM_CSD
 ;    ret
 ;endp
+
 ; SDIO mode
 ; ќтличи€ от SD memory:
 ; - CID регистр отсутствует
-; -
+; - CSD регистр отсутствует
 
 ;cmd5 - как ACMD41 но только дл€ SDIO
 ;arg = 0-31 - voltage mask, zero to check sdio
 ;resp = R4
 ;IN: ebx - argument
+; OUT: ZF - good ; not ZF - error
 proc    IO_SEND_OP_COND
         mov     edx, ((5 shl 8) + RESP_TYPE.R4 ) shl 16
 
         call    send_sdhc_command
         mov     ecx, [eax + SDHC_RESP1_0]
         mov     [esi + SDHCI_CONTROLLER.card_reg_ocr], ecx
-        test    dword[esi + SDHCI_CONTROLLER.int_status],0x8000
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.ERROR
         ret
 endp
 ;cmd52 -

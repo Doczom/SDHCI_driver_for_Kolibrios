@@ -3,6 +3,9 @@
 
 
 ; for ADMA2
+; edi = virtual addr, edx = block count
+; block size = 512
+; OUT: edi = phys addr table
 proc    create_adma2_table
 
         ret
@@ -31,15 +34,15 @@ endp
 
 ; WARNING!!! buffer align 9
 ; 4096 = 0..4 sectors + 1022*4 sectors + 0..4 sectors
-proc    create_mem_table
+;proc    create_mem_table
+;
+;        ret
+;endp
 
-        ret
-endp
-
-proc    destruct_mem_table
-
-        ret
-endp
+;proc    destruct_mem_table
+;
+;        ret
+;endp
 
 ; SDMA
 ;  send command

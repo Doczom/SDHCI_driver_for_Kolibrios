@@ -77,9 +77,7 @@ proc add_card_disk stdcall, hd_name:dword
         jz      .disk_add_fail
 
         invoke  DiskMediaChanged, eax, 1 ; system will scan for partitions on disk
-
         ret
-
 .disk_add_fail:
         DEBUGF  1, "Failed to add disk\n"
         ret
@@ -100,50 +98,59 @@ endp
 ; это либо использование SDMA или ADMA2 или, если этого нет, то
 ; работа через порт буфера
 proc    sdhci_read stdcall pdata: dword, buffer: dword, startsector: qword, numsectors_ptr:dword
+        pusha
+
         mov     esi, [pdata]
         mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-
-        cmp     dword[numsectors_ptr], 1
+        mov     ebx, dword[startsector]
+        mov     edx, [numsectors_ptr]
+        mov     edx, [edx]
+        mov     edi, [buffer]
+        DEBUGF  1,"SDHCI: read sector=%x num=%x \n", ebx, edx
+        cmp     edx, 1
         ja      .multiple
 
-        ; get phys addr
-        mov     eax, [buffer]
-        invoke  GetPhysAddr
-
-
         ; send CMD 17
+        call    READ_SIGLE_BLOCK
 
+        popa
+        mov     eax, 0
         ret
 .multiple:
-        ; get phys addr table
 
         ; send CMD 18
+        call    READ_MULTIPLE_BLOCK
 
-        ; send CMD 12
-
+        popa
+        mov     eax, 0
         ret
 endp
 proc    sdhci_write stdcall pdata: dword, buffer: dword, startsector: qword, numsectors_ptr:dword
+        pusha
         mov     esi, [pdata]
         mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
 
-        cmp     dword[numsectors_ptr], 1
+        mov     ebx, dword[startsector]
+        mov     edx, [numsectors_ptr]
+        mov     edx, [edx]
+        mov     edi, [buffer]
+        DEBUGF  1,"SDHCI: write sector=%x num=%x \n", ebx, edx
+        cmp     edx, 1
         ja      .multiple
 
-        ; get phys addr
-        mov     eax, [buffer]
-        invoke  GetPhysAddr
-
         ; send CMD 24
+        call    WRITE_BLOCK
 
+        popa
+        mov     eax, 0
         ret
 .multiple:
-        ; get phys addr table
 
         ; send CMD 25
+        call    WRITE_MULTIPLE_BLOCK
 
-        ; send CMD 12
-
+        popa
+        mov     eax, 0
         ret
 endp
 
@@ -158,7 +165,7 @@ proc   sdhci_querymedia stdcall, pdata, mediainfo
         mov     eax, [mediainfo]
         mov     edx, [pdata]
         mov     [eax + DISKMEDIAINFO.Flags], 0
-        mov     [eax + DISKMEDIAINFO.SectorSize], 512
+        mov     [eax + DISKMEDIAINFO.SectorSize], SD_BLOCK_SIZE
         mov     ecx, dword[edx + SDHCI_CONTROLLER.sector_count]
         mov     dword [eax + DISKMEDIAINFO.Capacity], ecx
         mov     ecx, dword[edx + SDHCI_CONTROLLER.sector_count + 4]
@@ -168,29 +175,19 @@ proc   sdhci_querymedia stdcall, pdata, mediainfo
         ret
 endp
 
-; UPD: Все эти режимы передачи данных не пересекаются и их можно разместить в одной функции
-; в обработке регистра int_status
-; чтоб можно было DMA режим менять на лету
-;read_functions:
-;        dd      0 ; no dma
-;        dd      0 ; sdma
-;        dd      0 ; adma1
-;        dd      0 ;adma2_read_sectors ; adma2
-;write_functions:
-;        dd      0 ; no dma
-;        dd      0 ; sdma
-;        dd      0 ; adma1
-;        dd      0 ;adma2_write_sectors ; adma2
-;
+proc    sdhci_close
+
+        ret
+endp
 
 align 4
 sdhci_callbacks:
     dd  sdhci_callbacks.end - sdhci_callbacks
-    dd  0   ; no close function
-    dd  0   ; no closemedia function
+    dd  0  ;sdhci_close       ; close function   -
+    dd  0  ; closemedia function
     dd  sdhci_querymedia  ; +
-    dd  sdhci_read    ; -
-    dd  sdhci_write   ; -
+    dd  sdhci_read        ; -
+    dd  sdhci_write       ; -
     dd  0   ; no flush function
     dd  0   ; use default cache size
 .end:

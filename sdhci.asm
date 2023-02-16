@@ -1,4 +1,4 @@
-;;      Copyright (C) 2022, Michael Frolov aka Doczom
+;;      Copyright (C) 2022-2023, Michael Frolov aka Doczom
 ;; SD host controller driver.
 ;;
 ;;                 !!!!ВНИМАНИЕ!!!!
@@ -10,128 +10,23 @@
 format PE native
 entry START
 use32
-;;;                            ;;;
-;                                ;
-;  Driver for SD host controller ;
-;                                ;
-;;;                            ;;;
+
         DEBUG                   = 1
         __DEBUG__               = 1
         __DEBUG_LEVEL__         = 1             ; 1 = verbose, 2 = errors only
 
 
         API_VERSION             = 0  ;debug
-
         STRIDE                  = 4      ;size of row in devices table
 
         SRV_GETVERSION          = 0
+
 ; base SD registers
-;0x00-0x0f - SD Command Generation
-; если версия контроллера меньше 3 или host_version_4_enable=0, то это адрес SDMA
-;Этот регистр содержит адрес системной памяти для передачи SDMA в 32битном режиме адресациию.
-;Когда хост контроллер останавливает передачу SDMA, этот регистр должен указывать на адрес
-;слудующую непрерывную позицию данных.
-;Доступ к этому регистру возможен только в том случае, если транзакция не выполняется(т.е. после
-;остановки транзакции).Чтение этого регистра во время SDMA передачи вернёт недопустимое значеие.
-;Драйвер хоста должен инициализировать этот регистр перед запуском SDMA передачи.
-;После остановки  SDMA следующий системный адрес следующей непрерывной позиции может быть считан
-;из этого регистра.
-;
-;Хост контроллер генерирует прерывание DMA, чтобы запросить драйвер хоста для обновления этого
-;регистра. Драйвер хоста устанавливает слудующий системный адрес следующей позиции данных в этот
-;регистр.Когда записывается самый верхний байт этого регистра(03h), хост контроллер перезапускает
-;передачу SDMA.
-;
-;ADMA не использует этот регистр
-; если версия больше и host_version_4_enable=1 то это 32bit block count(более подробно смотреть в
-;разделе 1.15) в версии 4.0 используется только для счётчика блоков для auto CMD23, длшя установки
-;аргумента CMD23 при выполнении auto CMD23. Хост контроллер будет уменьшать значение этого регистра
-;при каждой передаче и при достижении нуля передача данных прекращается.Доступ к этому регистру стоит
-;осуществлять только когда транзакция не выполняется. при чтении при транзакции контроллер
-;может вернуть недопустимое значение
-;=====
-; Как я понимаю значение этого регистра: адрес на область физ памяти на некое кол-во байт
-; его должен устанавливать драйвер перед каждой операцией sdma
-SDHC_SYS_ADDR   = 0x00 ;32bit SDMA System Address
-;В этом регистре содержится 3 значения.
-;0-11 Transfer Block Size
-; Этот регистр определяет размер блока передачи данных для CMD17, CMD18, CMD24, CMD25, CMD35.
-; можно задать значение от 1 до 2048 байт. не изменять и не читать во время транзакции
-; In case of memory? it shall be set up to 512 bytes( Reffer to Implementation Note in Section 1.7.2)
-;12-14 SDMA Buffer Boundary
-; Размер выделяемой нами физической памяти для SDMA команд.(4кб 8 кб 16 кб и тд. до 512к)
-; когда контроллер дошёл до конца выделенной нами памяти, вызывается прерывание DMA interrupt
-; если сгенерилось событие Transfer Complete interrupt то DMA interrupt не генерится
-; ADMA не использует этот регистр
-; эти регистры должны поддерживаться если в регистре capabilities register
-;  SDMA support = 1 и если в регистре Transfer Mode register   DMA Enable = 1
-;16-31 16 bit block count Register
-;   Версия хост контроллера 4.10 расширяет количество блоков до 32бит(см Раздел 1.15)
-;  выбор либо 16 либо 32 битного регистра подсчёта блоков определяется следующим образом:
-;   если Host version 4 enable = 0 или если для регистра 0х06 установленно ненулевое значение
-;  то выбирается регистр 0х06
-;   если   Host version 4 enable = 1 и регистр 0x06 установлен в ноль, то выбирает 32битный регистр
-; использование 16/32 битного регистра подсчёта блоков включено, если Block Count Enable в регистре
-; Trancfer Mode установлен в 1, и оно допустимо только для передачи нескольких блоков.
-; Драйвер должен установить в этот регистр значение от 1 до максимального количества блоков.
-; контроллер уменьшает это значение после каждой передачи блоков и останавливается, кодга количество
-; достигает нуля. установка регистра в нольприводит к тому, что блоки не передаются.
-;  Доступ к регистру возможен только когда нет транзакции. если она есть запись игнорится а чтение
-; возвращает неверное значение.
+SDHC_SYS_ADDR   = 0x00
 SDHX_BLK_CS     = 0x04
-  Block_size_register = 0x04 ;word
-  _16bit_block_count_register = 0x06 ;word
 ; Аргумент SD команды, подробнее в специфиации физического уровня
-SDHC_CMD_ARG    = 0x08 ; dword
-; Transfer Mode Register
-;   Этот регистр используется для контроля операций передачи данных.Драйвер должен установить этот регистр
-; перед выполнением команды с передачей данных(смотрет Data Pressent Select в Command регистре), или перед
-; выполнением Resume команды. Драйвер должен сохранить этот регистр когда передача данных преостановлена
-; (в результате выполнения команды приостановки) и восстановить его перед выполнением команды восстановления
-; Чтобы избежать потерю данных, контроллер должен реализовать защиту от записи для этого регистра во время
-; транзакции данных.Запись в этот регистр должна игнорироваться когда Command Inhibit (DAT) равен 1.
-;            0 - DMA Enable
-;                  Этот бит обеспечивает функциональность DMA как описано в разделе 1.4 .DMA может быть
-;                включено только в том случае, если оно поддерживается в регистре возможностей.
-;                Один из режимов работы DMA может быть выбран с помощью DMA Select в Host Control регистре.
-;                Если DMA не поддерживается этот бит всегда должен быть выставлен в 0. Если этот бит
-;                установлен в 1, то операция DMA должна начинаться когда драйвер хоста записывает в
-;                верхний байт Command регистра(0x0f).
-;            1 - Block Counter Enable
-;                  Этот бит используется для включения регистра подсчёта блоков, которые имеет значение
-;                только для передачи нескольких блоко. Когда этот бит нравен 0, регистр подсчёта блоков
-;                отключается, что полезно при выполнении бесконечной передачи(см таблицу 2-8)
-;                  Если передача данных ADMA2 составляет более 65535 блоков, этот бит должен быть
-;                  установлен в 0. В этом случае длина передачи данных определяется таблицей дискрипторов.
-;            2 - Auto CMD12 Enable
-;                  Для многократной передачи блоков требуется остановка транзакции через CMD12
-;                При установке этого бита контроллер сам отправляет эту команду при завершении транзакции
-;                Драйвер хоста не должен устанавливать этот бит, если команды не требуют cmd12 для
-;                остановки передачи данных.
-;            4 - Data Transfer Direction Select
-;                  Этот бит определяет направлене передачи данных по DAT линии. 1-Передача данных с карты
-;                в хост контроллер, 0 для всех остальных случаев.(1-чтение, 0-запись)
-;            5 - Multi/ Single Block Select
-;                  Этот бит устанавливается при выдаче команд многоблочной передачи с использованием
-;                DAT линии.Для любых других команд этот бит должен быть установлен в 0. Если этот бит
-;                установлен в 0 нет необходимости устанавливать Block Count регистр.
+SDHC_CMD_ARG    = 0x08
 SDHC_CMD_TRN    = 0x0c
-  transfer_mode_register = 0x0c ;word (using 0-5 bits)
-  ; Этот регистр нужно записывать только после того как проверили Command Inhibit(DAT) и (CMD),
-  ;Запись в верхний байт этого регистра начинает генерацию команды. Драйвер несёт ответственность
-  ;за запись этого регистра, поскольку контроллер не защищает запись, когда установлена Command Inhibit
-  ;(CMD)
-  ;          0-1 - Response Type Select
-  ;                   00 - No Response
-  ;                   01 - Response Length 136
-  ;                   10 - Response Length 48
-  ;                   11 - Response Length 48 check Busy after response
-  ;          3 - Command CRC Check Enable
-  ;          4 - Command index Check Enable
-  ;          5 - Data Present Select
-  ;          6-7 - Command Type
-  ;          8-13 - Command index
-  command_register = 0x0e ;word  (using 0-13)
 
 ;0x10-0x1f - Response
 SDHC_RESP1_0    = 0x10
@@ -139,38 +34,10 @@ SDHC_RESP3_2    = 0x14
 SDHC_RESP5_4    = 0x18
 SDHC_RESP7_6    = 0x1C
 
-;0x20-0x23 - Buffer Data Port  как я понимаю это указатель на буфер
-; Доступ к буферу контроллера можно получить через 32bit Data Port регистр(смю Раздел 1.7)
 SDHC_BUFFER     = 0x20
 
-;0x24-0x2f - Host Control 1 and Others
-  ; Present Satte Register (offset 0x24)
-  ;  Драйвер может получить состояние контроллера через этот 32 битный регистр.
-  ; 0 - Command inhibit (CMD)
-  ; 1 - Command inhibit (DAT)
-  ; 2 - DAT Line Active
-  ; 3-7 - Resevred
-  ; 8 - Write Transfer Active
-  ; 9 - Read Transfer Active
-  ;      Этот статус используется для не DMA записи транзакций.
-  ; 10 - Buffer Write Enable
-  ;      Этот статус используется для не DMA чтения транзакций.
-  ; 11 - Buffer Read Enable
-  ; 12-15 - Reserved
-  ;      Этот бит показывает вставлена карта или нет в слот. В нормальных условиях контроллер генерит
-  ;    прерывание Card Inesrtion и Card Removed. Ресет всего не должен влиять на это.
-  ; 16 - Card Inserted
-  ; 17 - Card State Stable
-  ; 18 - Card Detect Pin Level
-  ;      Этот бит отображает пин SDWP#. Переключатель защиты от записи поддерживается для карт памяти
-  ;    и комбинированных карт.
-  ; 19 - Write Protect Switch Pin Level (1 - Write enable SDWP#=1, 0 - Write protected SDWP#=0)
-  ;
-  ; 20-23 - DAT[0:3] Line Signal Level
-  ;      Этот статус используется для проверки уровня CMD линии для восстановления после ошибки и отладки.
-  ; 24 - CMD Line Signal Level
-  ; 25-31 - Reserved
 SDHC_PRSNT_STATE = 0x24  ;word (12-15 , 26 Rsvd)
+PRSNT_STATE:
   .CMD_INHIB_CMD = 0x01 ; for test [eax + SDHC_PRSNT_STATE], SDHC_PRSNT_STATE.CMD_INHIB_CMD
   .CMD_INHIB_DAT = 0x02
   .DAT_LINE_ACTIVE = 0x04
@@ -184,357 +51,89 @@ SDHC_PRSNT_STATE = 0x24  ;word (12-15 , 26 Rsvd)
   .WP_LEVEL        = 0x80000
   .DAT_LEVEL       = 0xf00000 ; 4 bits
   .CMD_LEVEL       = 0x1000000
-  ; Host control Register (offset 0x28)
-  ; 0 - LED Control  (0 - LED off; 1 - LED on)
-  ;       Этот бит используется для предупреждения полдьзователя о том чтобы он не извлекал карту во
-  ;     время доступа к SD карте. Если ПО собирается выдавать несколько команд SD, этот бит может быть
-  ;     установлен во время всех этих транзакций. Нет необходимости вносить изменения для каждой
-  ;     транзакции.
-  ; 1 - Data Transfer Width (0 - 1 bit mode; 1 - 4 bit mode)
-  ;       Этот бит выбирает ширину данных хост контроллера. Драйвер должен настроить его так чтобы он
-  ;     соответствовал шарене данных SD карты.
-  ; 2 - High Speed Enable ( 0 - Normal Speed mode; 1 - High Speed mode)
-  ;       Это необязательный бит. Перед установкой проверить регистр Capabilities.
-  ;     Если этот бит равен 0 - частота до 25 МГц, если 1 - до 50 МГц.
-  ; 3-4 - DMA Select
-  ;       Выбор одного из поддерживаемых режимов DMA. Перед этим проверить регистр Capabilities.
-  ;     Использование выбранного DMA оперделяется DMA Enable в регистре Transfer Mode.
-  ;         00 - SDMA
-  ;         01 - Reserved
-  ;         10 - 32-bit Address ADMA2
-  ;         11 - 64-bit Address ADMA2
-  ; 6 - Card Detect Test Level (1 - Card Inserted; 0 - Not Card)
-  ;       Этот бит включён когда Card Detect Signal Selection равен 1 и он указывает вставлена
-  ;     карта или нет.
-  ; 7 - Card Detect Signal Selection  (0 - SDCD# (for normal use); 1 - The Card Detect Test Level (for test purpose))
-  ;       Этот бит выбирает источник обнаружения карт.
-  ;     Зануляем всё что связанно с прерываниями(маску прерываний и прочее).
+
 SDHC_CTRL1      = 0x28
-  ; Power Control Regstre (offset 29h)
-  ; 0   -  SD Bus Power for VDD1
-  ;           Если хост контроллер детектит No Card состояние, то надо этот флаг очистить
-  ; 1-3 -  SD Bus Voltage Select for VDD1
-  ;          Этот бит может быть установлен если в регистре capabilities  параметр 1.8V VDD2 Support
-  ;        установлен в 1.
-  ;           101 - 1.8V
-  ;           110 - 3.0V
-  ;           111 - 3.3V
   Power_control = 0x29  ; byte (using 0-3 bits)
-  ;
   block_gap_control = 0x2a ;byte (using 0-3 bits)
-;   Драйвер должен поддерживать вольтаж на SD шине устанавливая SD Bus Power в Power Control, when wake
-; up event via Card Interrupt is desired.
-;   Как это понимаю я, я должен активировать эти флаги для того чтобы ловить прерывания подкл/откл карты.
-; и FN_WUS в регистре CIS установить для 00 бита данного регистра.
-;       00 - Wakeup Event Enable On Card Intwrrupt.
-;       01 - Wakeup Event Enable On SD Card Insertion
-;       02 - Wakeup Event Enable On SD Card Removal
   Wekeup_control = 0x2b  ;byte (using 0-2 bits)
 
-; 0x2c - SDHC_CTRL2
-; При инициализации необходимо заполнить поле SDCLK/RCLK Frequency Select в соответствии с регистром
-; Capabilities. Этот регистр управляет SDCLK в SD Mode и RCLK в UHS-II Mode.
-;       0      - Internal Clock Enable
-;              Этот бит устанавливается в ноль когда драйвер не использует контроллер или контроллер
-;            ожидает прерывание пробуждения.Контроллер переходит в режим низкого потреблеиния,
-;            останавливает внутренние часы(internal clock), регистры доступны и на чтените и на запись.
-;            Часы начинают колебаться, когда бит установлен в 1, Когда тактовая частота стабилизируется
-;            контроллер устанавливает бит Internal Clock Stable в состояние 1. Этот бит не влияет на
-;            обноружение карт(но это не точно).
-;       1      - Internal Clock Stable
-;              Начиная с версии 4.0 драйвер проверяет этот статус дважды, после установки внутренних
-;            часов(см выше) и после установки PLL Enable.(Refer to Figure 3-3)
-;              1) Internal Clock Stable(Когда PLL Enable = 0 или если не поддерживается)
-;                  Контроллер устанавливает этот регистр в 1, когда частота стабилизируется (см выше)
-;                (Doczom: как то всё запутанно, я так понял надо очередной цикл по проверке тут делать)
-;              2) PLL Clock Stable (PLL Enable = 1)
-;                  Контроллер поддерживающий PLL Enable, устанавливает это значение в 0, при изменении
-;                PLL Enable с 0 на 1 и устанавливает 1, когда PLL заблокирован(PLL использует встроенный
-;                часы в качестве эталонных часов, которые включаются в Internal Clock Enable). После
-;                того, как этот бит установлен в 1, драйвер может менять SD clock Enable.
-;       2      - SD Clcok Enable
-;                  Хост контроллер должен остановить SDCLK при записи этого бита в 0. Выбор частоты SDCLK
-;                может быть изменён кагда этот бит равен 0. Затем хост контроллер должен поддерживать
-;                ту же частоту до тех пор, пока SDCLK не будет остановлен(Остановка при SDCLK=0). Если
-;                Card insert в регистре Present State очищен, этот бит должен быть очищен.
-
-;;       3      - PLL Enable
-;;                  Этот регистр появился в версии 4.10 контроллера, использующего PLL. Это позволяет
-;;                инициализировать clock генератор в 2 этапа: a)стабилизация входных тактовых импульсов
-;;                PLL с Internal Clock Enable и b) стабилизация PLL с PLL Enable.
-;;                Контроллер может настроить минимальные задержки с помощью SD Clock Enable.
-;;
-;;       4      - Reaerved
-
-;       8 - 15 - SDCLK/RCLK Frequency Select
-;              Этот регистр используется для выбора частоты SDCLK пина.Определение этого поля
-; зависит от версии контроллера
-;       1) 8 битный Разделитель Тактов
-;            этот режим поддерживается в версии 1 и 2. Частота не программируется напрямую, а
-;          содержит делитель для Base Clock Frequency For SD Clock в регистре Capabilities
-;                   0x08 - base clock / 256
-;                   0x40 - base clock / 128
-;                   0x20 - base clock / 64
-;                   0x10 - base clock / 32
-;                   0x08 - base clock / 16
-;                   0x04 - base clock / 8
-;                   0x02 - base clock / 4
-;                   0x01 - base clock / 2
-;                   0x00 - base clock (10MHz-63MHz)
-;            При указании частоты используется самый старший бит, согласно спецификации физического
-;          уровня максимальная частота SD Clock = 25 MHz в нормальной скорости и 50 MHz, при высокой
-;          скорости и никогда не должна превышать этот лимит. Всегда надо выбирать ближайшую к нужной
-;          равную или меньше например base Clock  = 33MHz а целевая частота равна 25MHz, то выбираем
-;          значение делителя 0x01 = 16,5MHz, ближайщее меньшее или равное. Аналогисно для целевой
-;          частоты 400KHz значение делителя ставим в 0x40 оптимальное тактовое значенике 258kHz.
-;       2) 10 битный Разделитель тактов
-;            Хост контроллер версии 3.0 или более новые, значение просто расширяется до 10 бит
-;          и делитель меняется
-;                   0x3ff -  1/2046 base clock
-;                     n   -  1/2n base clock
-;                   0x002 -  1/4 base clock
-;                   0x001 -  1/2 base clock
-;                   0x000 -  Base Clock (10MHz - 155MHz)
-;       3) Программируемый Разделитель Тактов
-;            Контроллер версии 3.0 и выше если Clock Multiplier в регистре Capabilities не нулевой
-;          и что-то. Множитель позволяет хост-системе более чётко выбирать частоту нет необходимости
-;          поддерживать генерацию всех частот, указанных в этом поле, поскольку программируемый
-;          генератор импульсов зависит от конкретного поставщика и зависит от реализации. Поэтому
-;          этот режим используется с регистром Preset Value.
-;          Поставщик контроллера предоставляет возможные настройки, а поставщики хост-систем
-;          соответствующее значения в регистры Preset Value.
-;                   0x3FF - Base clock * M/1024
-;                    N-1  - base clock * M/N
-;                   0x002 - base clock * M/3
-;                   0x001 - base clock * M/2
-;                   0x000 - base clock * M
-;            Это поле зависит от установленного значение в Preset Value Enable в регистре
-;          Host control 2. Если Preset Value Enable = 0, то этот регистр устанавливает драйвер,
-;          если = 1 , то это значение автоматически устанавливается установленное в одном из
-;          Preset value регистров.
 SDHC_CTRL2      = 0x2C
   clock_control = 0x2c ;word
-;При инициализации контроллера, драйвер должен установить это значение согласно регистру capabilities
-;
   timeout_control = 0x2e ;byte (using 0-3 bits)
-
-; Импульс генерится при изменении битов этого регистра
-;для подтверждения завершения сброса смотрим чтобы все биты были равны нулю(скорее всего цикл)
-; 0x02 - software reset для DAT линии (только SD Mode)
-;    очищаются:
-;      Buffer Data Port register
-;         буфер очищается и инициализируется
-;      Present State register
-;         Buffer Read Enable
-;         Buffer Write Enable
-;         Read Transfer Active
-;         Write Transfer Active
-;         DAT Line Active
-;         Command Lnhibit(DAT)
-;      Block Gap Control register
-;         Continue Request
-;         Stop At Block Gap Request
-;      Normal Interrupt Status register
-;         Buffer Read Ready
-;         Buffer Write Ready
-;         DMA interrupt
-;         Block Gap Event
-;         Transfer Complete
-; 0x01 - software reset for CMD линии
-; Для версии 4.10 используется для инициализации командной системы UHS-II
-; Этот сброс действует только на схемы выдачи команд(включая состояние ошибки ответа в
-; Command Inhibit(CMD) control) и не влияет на схему передачи данных.
-; Контроллер может продолжать передачу данных, даже если этот сброс выполняется во время
-; обработки ошибки ответа субкоманды.
-;    очищаются:
-;      Present State register
-;         Command Inhibit (cmd)
-;`     Normal Interrupt Status register
-;         Command Complete
-;      Error Interrupt Status (from Version 4.10)
-;         Response error statuses related to Command Inhibit (CMD)
-; 0x00 - software reset for All
-; Этот сброс влияет на весь контроллерЮ за исключением схемы обнаружения карты.
-; Биты регистров с типом: ROC RW RW1C RWAC очищаются в 0
-; Во время инициализации драйвер должен вызвать этот сброс (контроллер очистит capabilities регистр)
-;Повторное выцзывание этого сброса может не повлиять на capabilities register.
-;Если этот бит установлен в 1,драйвер вызвает команду сброса и заново инициализирует SD-карту
   software_reset = 0x2f ;byte (using 0-2 bits)
     .software_reset_for_all             = 0x01  ;1-reset 0-work
     .saftware_reset_for_cmd_line        = 0x02  ;1-reset 0-work
     .software_reset_for_dat_line        = 0x04  ;1-reset 0-work
 
 ;0x30-0x3d - Interrupt Controls
-; В спецификации до 3.0 есть только 0-8 биты, бит 15 есть во всех версиях
 SDHC_INT_STATUS = 0x30
-  normal_int_status = 0x30 ; word
-    .command_complete                   = 0x01
-    .transfer_complete                  = 0x02
-    .block_gap_event                    = 0x04
-    .dma_interrupt                      = 0x08
-    .buffer_write_ready                 = 0x10
-    .buffer_read_ready                  = 0x20
+SDHC_INT_MASK   = 0x34
+SDHC_SOG_MASK   = 0x38
+INT_STATUS:
+    .CMD_DONE       = 0x01
+    .DAT_DONE       = 0x02
+    .BLOCK_GAP_EVT  = 0x04
+    .DMA_EVT        = 0x08
+    .BUF_WR_RDY     = 0x10
+    .BUF_RD_RDY     = 0x20
     ; Если появилось прерывания вставки или вытаскивания карты, нужно проверить это через регистр 0x24 .
     ;для отключения генерации прерываний записать в нужный бит единицу(через or например).
-    .card_insertion                     = 0x40
-    .card_removal                       = 0x80
-    .card_interrupt                     = 0x0100
-    .INT_A                              = 0x0200
-    .INT_B                              = 0x0400
-    .INT_C                              = 0x0800
-    .re_tuning_event                    = 0x1000
-    .FX_event                           = 0x2000
+    .CARD_INS       = 0x40
+    .CARD_REM       = 0x80
+    .SDIO           = 0x0100
+    .INT_A          = 0x0200 ; in 2 version not used
+    .INT_B          = 0x0400 ; in 2 version not used
+    .INT_C          = 0x0800 ; in 2 version not used
+    ;.re_tuning_event = 0x1000
+    ;.FX_event        = 0x2000
     ; 14 bit reserved
-    .error_interrupt                    = 0x8000   ;есть во всех версиях спеки
-  error_int_status = 0x32 ;word
-    .command_timeout_error              = 0x01   ; 1=time out 0=no_error  (SD mode only)
-    .command_crc_error                  = 0x02   ; 1=crc error generation 0=no error (sd mode only)
-    .command_end_bit_error              = 0x04   ; 1=end_bit_error_generation 0=no error (sd mode only)
-    .command_index_error                = 0x08   ; 1=error 0=no error (SD mode only)
-    .data_timeout_error                 = 0x10   ; 1=time out 0= no error (sd mode only)
-    .data_crc_error                     = 0x20   ; 1=error 0=no error (sd mode only)
-    .data_end_bit_error                 = 0x40   ; 1=error 0=no error (sd mode only)
-    .current_limit_error                = 0x80   ; 1=Power_fail 0=no_error
-    .auto_cmd_error                     = 0x0100 ; 1=error 0=no error (sd mode only)
-    .adma_error                         = 0x0200 ; 1=error 0=no error     ; появляется во 2 версии спеки
-    .tuning_error                       = 0x0400 ; 1=error 0=no error (UHS-I only)
-    .response_error                     = 0x0800 ; 1=error 0=no error (SD mode only)
-    .vendor_specific_error_status       = 0xf000 ; 1=error 0=no error
-SDHC_INT_MASK   = 0x34
-  normal_int_status_enable = 0x34 ;word
-    .command_complete_status_enable      = 0x01   ; 1=enabled 0=masked
-    .transfer_complete_status_enable     = 0x02   ; 1=enabled 0=masked
-    .block_gap_event_status_enable       = 0x04   ; 1=enabled 0=masked
-    .dma_interrupt_status_enable         = 0x08   ; 1=enabled 0=masked
-    .buffer_write_readly_status_enable   = 0x10   ; 1=enabled 0=masked
-    .buffer_read_readly_status_enable    = 0x20   ; 1=enabled 0=masked
-    .card_insertion_status_enable        = 0x40   ; 1=enabled 0=masked
-    .card_removal_status_enable          = 0x80   ; 1=enabled 0=masked
-    .card_interrupt_status_enable        = 0x0100 ; 1=enabled 0=masked
-    .INT_A_status_enable                 = 0x0200 ; 1=enabled 0=masked (embedded)
-    .INT_B_status_enable                 = 0x0400 ; 1=enabled 0=masked (embedded)
-    .INT_C_status_enable                 = 0x0800 ; 1=enabled 0=masked (embedded)
-    .Re_tuning_event_status_enable       = 0x1000 ; 1=enabled 0=masked (UHS-I only)
-    .FX_event_status_enable              = 0x2000 ; 1=enabled 0=masked
-    ;reserved 14 bit
-    .Fixed_to_0                          = 0x8000   ;есть во всех версиях спеки
-  error_int_status = 0x36
-    .command_timeout_error_status_enable = 0x01   ; 1=enabled 0=masked (SD mode only)
-    .command_crc_error_status_enable     = 0x02   ; 1=enabled 0=masked (SD mode only)
-    .command_end_bit_error_status_enable = 0x04   ; 1=enabled 0=masked (SD mode only)
-    .command_index_error_status_enable   = 0x08   ; 1=enabled 0=masked (SD mode only)
-    .data_timeout_error_status_enable    = 0x10   ; 1=enabled 0=masked (SD mode only)
-    .data_crc_error_status_enable        = 0x20   ; 1=enabled 0=masked (SD mode only)
-    .data_end_bit_error_enable           = 0x40   ; 1=enabled 0=masked (SD mode only)
-    .current_limit_error_status_enable   = 0x80   ; 1=enabled 0=masked
-    .auto_cmd_error_status_enable        = 0x0100 ; 1=enabled 0=masked (SD mode only)
-    .adma_error_status_enable            = 0x0200 ; 1=enabled 0=masked
-    .tuning_error_status_enable          = 0x0400 ; 1=enabled 0=masked (UHS-I only)
-    .response_error_status_enable        = 0x0800 ; 1=enabled 0=masked (SD mode only)
-    .vendor_specific_error_status_enable = 0xf000 ; 1=enabled 0=masked (НЕ ИСПОЛЬЗОВАТЬ!!!)
-SDHC_SOG_MASK   = 0x38
-  normal_int_signal_enable = 0x38
-    .command_complete_signal_enable      = 0x01   ; 1=enabled 0=masked
-    .transfer_complete_signal_enable     = 0x02   ; 1=enabled 0=masked
-    .block_gap_event_signal_enable       = 0x04   ; 1=enabled 0=masked
-    .dma_interrupt_signal_enable         = 0x08   ; 1=enabled 0=masked
-    .buffer_write_ready_signal_enable    = 0x10   ; 1=enabled 0=masked
-    .buffer_read_ready_signal_enable     = 0x20   ; 1=enabled 0=masked
-    .card_insertion_signal_enable        = 0x40   ; 1=enabled 0=masked
-    .card_removal_signal_enable          = 0x80   ; 1=enabled 0=masked
-    .card_interrupt_signal_enable        = 0x0100 ; 1=enabled 0=masked
-    .INT_A_Signal_enable                 = 0x0200 ; 1=enabled 0=masked (embedded)
-    .INT_B_Signal_enable                 = 0x0400 ; 1=enabled 0=masked (embedded)
-    .INT_C_Signal_enable                 = 0x0800 ; 1=enabled 0=masked (embedded)
-    .Re_tunning_event_signal_enable      = 0x1000 ; 1=enabled 0=masked (UHS_I only)
-    .FX_event_signal_enable              = 0x2000 ; 1=enabled 0=masked
-    ;reserved 14 bit
-    .Fixed_to_0                          = 0x8000 ; The Host Driver shall control
-    ; error interrupts using the Error Interrupt Signal Enable register.
-  error_int_signal_enable = 0x3a
-    .command_timeout_error_signal_enable = 0x01   ; 1=enabled 0=masked (SD mode only)
-    .command_crc_error_signal_enable     = 0x02   ; 1=enabled 0=masked (sd mode only)
-    .command_end_bit_error_signal_enable = 0x04   ; 1=enabled 0=masked (sd mode only)
-    .command_index_error_signal_enable   = 0x08   ; 1=enabled 0=masked (sd mode only)
-    .data_timeout_error_signal_enable    = 0x10   ; 1=enabled 0=masked (sd mode only)
-    .data_crc_error_signal_enable        = 0x20   ; 1=enabled 0=masked (sd mode only)
-    .data_end_bit_sagnal_enable          = 0x40   ; 1=enabled 0=masked (sd mode only)
-    .current_limit_error_signal_enable   = 0x80   ; 1=enabled 0=masked
-    .auto_cmd_error_signal_enable        = 0x0100 ; 1=enabled 0=masked (sd mode only)
-    .adma_error_signal_enable            = 0x0200 ; 1=enabled 0=masked
-    .tuning_error_signal_enable          = 0x0400 ; 1=enabled 0=masked (UHS-I only)
-    .response_error_signal_enable        = 0x0800 ; 1=enabled 0=masked (sd mode only)
-    .vendor_specific_error_signal_enable = 0xf000 ; 1=enabled 0=masked (НЕ ИСПОЛЬЗОВАТЬ!!!)
+    .ERROR          = 0x8000   ;есть во всех версиях спеки
+    ; error interupt
+    .ALL_ERROR      = 0xFFFF0000 ; set all type error
+    .CMD_TO_ERR     = 0x01   ; (SD mode only)
+    .CMD_CRC_ERR    = 0x02   ; 1=crc error generation 0=no error (sd mode only)
+    .CMD_END_ERR    = 0x04   ; 1=end_bit_error_generation 0=no error (sd mode only)
+    .CMD_IDX_ERR    = 0x08   ; (SD mode only)
+    .DAT_TO_ERR     = 0x10   ; 1=time out 0= no error (sd mode only)
+    .DAT_CRC_ERR    = 0x20   ; (SD mode only)
+    .DAT_END_ERR    = 0x40   ; (SD mode only)
+    ;.current_limit_error = 0x80   ; 1=Power_fail 0=no_error
+    .ACMD12_ERR     = 0x0100 ; (SD mode only)
+    .ADMA_ERR       = 0x0200 ; появляется во 2 версии спеки
+    ;.tuning_error  = 0x0400 ; 1=error 0=no error (UHS-I only)
+    ;.response_error = 0x0800 ; (SD mode only) in 4.00 version
+    ;.vendor_specific_error_status = 0xf000
 SDHC_ACMD12_ERR = 0x3C
-  Auto_cmd_error_status = 0x3C ;word(using 0-7 bits)
-    .auto_cmd12_not_excuted  = 0x01 ; check 0 bit - 1=not_executed 0=executed
-    .auto_cmd_timeout_error  = 0x02 ; check 1 bit   1=time out 0=no_error
-    .auto_cmd_crc_error      = 0x04 ; check 2 bit   1=crc error generation 0=no_error
-    .auto_cmd_end_bit_error  = 0x08 ; check 3 bit   1=end_bit_error_generated  0=no_error
-    .auto_cmd_index_error    = 0x10 ; check 4 bit   1=error 0=no_error
-    .auto_cmd_response_error = 0x20 ; check 5 bit   1=error 0=no_error
-    ; 6 bit is reserved
-    .command_not_issued_by_auto_cmd12_error = 0x80 ; check 7 bit   1=Not_issued 0=no_error
+ACMD12_ERR:
+    .EXE_ERR    = 0x01 ; 1=not_executed 0=executed
+    .TO_ERR     = 0x02 ; 1=time out 0=no_error
+    .CRC_ERR    = 0x04 ; 1=crc error generation 0=no_error
+    .END_ERR    = 0x08 ; 1=end_bit_error_generated  0=no_error
+    .INDEX_ERR  = 0x10 ; 1=error 0=no_error
+    ;.auto_cmd_response_error = 0x20 1=error 0=no_error
+    ; 5-6 bit is reserved
+    .CMD_ERR    = 0x80 ; 1=Not_issued 0=no_error
 
 ;0x3e-0x3f - Host Control 2 ;spec version 3
 SDHC_HOST_CONTROL_2_REG = 0x3e   ; word
 
-;0x40-0x4f - Capabilities
-;Этот регистр предоставляет драйверу инфу, специфичную для реализации данного контроллера.
-; Смотреть после полного сброса. Для разных версий спеки разная конфигурация регистров с
-;сохранением  обратной совместимости
-SDHC_CAPABILITY = 0x40    ;qword
+SDHC_CAPABILITY = 0x40 ;qword
+SDHC_CURR_CAPABILITY = 0x48 ; qword (using 0-23 32-39)
 
-;этот регистр указывает на максимальную токовую способность для каждого вида напряжения,
-;если контроллер поддерживает это напряжение(регистр 0x40). Если контроллер передаёт
-;эти значения другим методом, то этот регистр должен быть выставлен в ноль.
-;    0 - 7 - 3.3V VDD1
-;    8 - 15 - 3.0V VDD1
-;    16 - 23 - 1.8V VDD1
-;    24 - 31 - reserved
-;    32 - 39 - 1.8V VDD2
-;    40 - 63 - resevred
-; Данный регистр измеряет ток с шагом 4мА
-;    0 - Получение информации другим способом
-;    1 - 4 мА
-;    2 - 8 мА
-;    3 - 12 мА
-;    ...
-;    255 - 1020 мА
-; Драйвер контроллера поддерживающего SDXC карты должен проверить этот регистр для установления
-;значения XPC в аргументе ACMD41. Если контроллер может позволить себе больше 150 мА то XPC = 1,
-;иначе XPC = 0. Подробнее о XPC в спеке физического уровня 3.0x.
-SDHC_CURR_CAPABILITY = 0x48    ; qword (using 0-23 32-39)
-
-;0x50-0x53 - Force Event ; spec version 2
 SDHC_FORCE_EVT  = 0x50
   force_event_register = 0x50 ;word (using 0-7 bits)
   force_event_register_for_interrupt_status = 0x52 ; word
 
-;0x54-0x5f - ADMA2       ; spec version 2
-SDHC_ADMA_ERR   = 0x54
-  ADMA_error_status = 0x54 ; byte (using 0-2 bits)
-
+SDHC_ADMA_ERR   = 0x54 ; byte (using 0-2 bits)
 SDHC_ADMA_SAD   = 0x58
 
-;0x60-0x6f - Preset Value ;spec version 3
-
-;0x70-0x77 - ADMA3 ;spec version 4
-
-;0x80-0xD7 - UNS-II
-
-;0xe0-0xef - Pointers
-
-;0xf0-0xff  - common area
 SDHC_VER_SLOT   = 0xfc ; block data
  SLOT_INTRPT     = 0xfc ;Slot interapt status register 1 byte; 0xfd - reserved
- ;как я понял, это глобальный флаг который показывает, где произошло прерывание
- ; всего есть 8 слотов, каждому из которых соответструет 1 бит
  SPEC_VERSION = 0xfe ; in map register controller(15-8 - vendor version; 7-0 - spec version)
  VENDOR_VERSION = 0xff
 
 ; PCI reg
-pci_class_sdhc  = 0x0805  ;basic_class=0x08 sub_class=05
+pci_class_sdhc  = 0x0805 ;basic_class=0x08 sub_class=05
 PCI_BAR0        = 0x10
 PCI_BAR1        = 0x14
 PCI_BAR2        = 0x18
@@ -543,8 +142,9 @@ PCI_BAR4        = 0x20
 PCI_BAR5        = 0x14
 PCI_IRQ_LINE    = 0x3C
 
-PCI_slot_information = 0x40    ;0-2 first BAR 4-6 - number of Slots(counter BAR?)
-; code
+PCI_slot_information = 0x40 ;0-2 first BAR 4-6 - number of Slots(counter BAR?)
+
+
 section '.flat' code readable writable executable
 
 include 'drivers/proc32.inc'
@@ -619,7 +219,7 @@ list_controllers:
 .fd:       dd list_controllers ; pointer to first item list
 .bk:       dd list_controllers ; pointer to last item list
 
-tmp_void:       dd 0
+root_PCIList:       dd 0
 
 proc START c, state:dword, cmdline:dword
         cmp     [state], DRV_ENTRY
@@ -629,12 +229,12 @@ proc START c, state:dword, cmdline:dword
         ;detect controller
         DEBUGF  1,"SDHCI: Loading driver\n"
         invoke  GetPCIList
-        mov     [tmp_void], eax
+        mov     [root_PCIList], eax
         push    eax
 .next_dev:
         pop     eax
         mov     eax, [eax+PCIDEV.fd]
-        cmp     eax, [tmp_void]
+        cmp     eax, [root_PCIList]
         push    eax
         jz      .end_find
 
@@ -699,28 +299,6 @@ proc START c, state:dword, cmdline:dword
         xor     eax, eax
         pop     ebp edi esi ebx
         ret
-
-        ;DEBUGF   1,"Controller found: class:=%x bus:=%x devfn:=%x \n",[eax + PCIDEV.class],[bus],[dev]
-
-        ;set offset SDMA System address
-        ;mov     al, byte[ver_spec]
-        ;and     al, 111b
-        ;mov     ebx, [base_reg_map]    ; set ebx=SDHC_SYS_ADRR +[base_sdhc_reg]
-        ;cmp     al, 0x02 ; ver 3.0 - adding register host control 2
-        ;jbe     @f ;
-        ;test    word[ebx + SDHC_HOST_CONTROL_2_REG], 0xC ; check 12 bit this register
-        ;jz      @f;
-        ;add     ebx, SDHC_ADMA_SAD
-;@@:
-        ;mov     [SDMA_sys_addr],ebx
-        ;DEBUGF  1,"set SDMA_sys_addr : %x \n",[SDMA_sys_addr]
-
-
-        ; TODO: working with registers controller
-        ; set function for working in DMA and no DMA mode
-        ; SDMA - алгоритм DMA для этого контроллера. За одну команду SDMA
-        ; может быть выполенна одна транзакция SD command.
-        ; Support of SDMA can be checked by the SDMA Support in the Capabilities register.
 endp
 
 ;init controller, set base value, add interrupt function, set stucture for controller
@@ -826,7 +404,7 @@ proc sdhci_init
         or      dword[eax + SDHC_CTRL1], ecx
         ; байт 0x28 установлен в начальное значение
 
-        ; установить значения частот
+        ; получить значения делителей частоты
         push    eax
         mov     eax, [esi + SDHCI_CONTROLLER.Capabilities]
         shr     eax, 8
@@ -873,23 +451,27 @@ proc sdhci_init
         mov     dword[eax + SDHC_INT_STATUS], 0x00
 
         ; set Wekeup_control
-        or      byte[Wekeup_control], 111b
+        or      byte[eax + Wekeup_control], 111b
 
         ; save and attach IRQ
+        and     dword[eax + SDHC_INT_MASK], 0
+        and     dword[eax + SDHC_SOG_MASK], 0
+
         invoke  PciRead8, dword [esi + SDHCI_CONTROLLER.bus], dword [esi + SDHCI_CONTROLLER.dev], PCI_IRQ_LINE ;al=irq
         movzx   eax, al
         mov     [esi + SDHCI_CONTROLLER.irq_line], eax ;save irq line
         invoke  AttachIntHandler, eax, sdhc_irq, esi ;esi = pointre to controller struct
+
         mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
-        or      dword[eax + SDHC_INT_MASK], 0x40 or 0x80
-        or      word[eax + SDHC_SOG_MASK], 0x40 or 0x80
+        or      dword[eax + SDHC_INT_MASK], INT_STATUS.CARD_INS + INT_STATUS.CARD_REM
+        or      dword[eax + SDHC_SOG_MASK], INT_STATUS.CARD_INS + INT_STATUS.CARD_REM
         DEBUGF  1,'SDHCI: Enable insert and remove interrupt\n'
 
         ; Детектим карты
         ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
         test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
         jz      @f
-        call    card_detect ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
+        call    card_init ; eax - REGISTER MAP esi - SDHCI_CONTROLLER
 @@:
 
         xor     eax, eax
@@ -903,10 +485,10 @@ endp
 ; eax - map reg
 ; ebx - divider Clock base
 proc set_SD_clock
-        and     dword[eax + SDHC_CTRL2], 0xffffffff - 0x04  ; stop clock
+        and     dword[eax + SDHC_CTRL2], not 100b  ; stop clock
 
 
-        and     dword[eax + SDHC_CTRL2], 0xffff004f ; clear
+        and     dword[eax + SDHC_CTRL2], 0xffff0000 ; clear
         cmp     ebx, 0x80
         jbe     @f
 
@@ -929,14 +511,14 @@ proc set_SD_clock
         or      dword[eax + SDHC_CTRL2], 0x04 ; set SD clock enable
         ret
 endp
-; out: ebx  = type card 0 - unknow card 1 - sdio 2 - sd card(ver1 ver2 ver2-hsp ), 4 - spi(MMC, eMMC)
+
+
 proc card_init
-        ;DEBUGF  1,'SDHCI: Card init\n'
-        mov     dword[esi + SDHCI_CONTROLLER.card_reg_rca], 0 ; обнуляем адрес карты
+        DEBUGF  1,'SDHCI: Card inserted\n'
+        and     dword[esi + SDHCI_CONTROLLER.card_reg_rca], 0 ; обнуляем адрес карты
         ;включаем прерывания 0х01
         or      dword[eax + SDHC_INT_MASK], 0xFFFF0001
         or      dword[eax + SDHC_SOG_MASK], 0xFFFF0001
-        DEBUGF  1,'SDHCI: INT_MASK = %x\n',[eax + SDHC_INT_MASK]
         ; Включить питание (3.3В - не всегда) максимально возможное для хоста
         ; дай бог чтоб не сгорело ничего
         mov     ebx, [esi + SDHCI_CONTROLLER.Capabilities]
@@ -967,7 +549,7 @@ proc card_init
         ;выбираем режим работы(sd bus, spi) - но это не точно  ; Это не тут, ниже
 
         ; cmd5 voltage window = 0 - check sdio
-        DEBUGF  1,"SDHCI: CMD5 - check SDIO\n"
+        ;DEBUGF  1,"SDHCI: CMD5 - check SDIO\n"
         xor     ebx, ebx ; arg cmd, zero to get voltage mask and to check SDIO functions
         call    IO_SEND_OP_COND; 0 - test voltage mask to check SDIO interface, ZF=1-sdio
         jz      .sdio
@@ -990,21 +572,19 @@ proc card_init
                                ; правильной проверки irq всё виснит
         ; for all init card : cmd3 - get RCA
         call    SEND_RCA
-        ; get CSD register
+
         call    SEND_CSD
 
-        ; send CMD7
         call    SELECT_CARD
 
         test    [esi + SDHCI_CONTROLLER.card_reg_ocr], 0x40000000
         jnz     @f
 
-        ;send CMD 16
         mov     ebx, 0x200 ; 512 byte
         call    SET_BLOCKLEN
 @@:
 
-        ; get size device
+        ; get size device  TODO: заменить на определения метода через OCR регистр
         test    dword[esi + SDHCI_CONTROLLER.card_reg_csd + 12], 0x400000  ;check version SCD ver2
         jz      @f
 
@@ -1025,11 +605,18 @@ proc card_init
 .end_get_size:
         DEBUGF  1,"SDHCI: Sectors card = %d:%d\n",[esi + SDHCI_CONTROLLER.sector_count + 4],\
                                                   [esi + SDHCI_CONTROLLER.sector_count]
-        DEBUGF  1,"SDHCI: TEST1 SDMA - read first sector\n"
-        call    TEST_SDMA_R
 
-        DEBUGF  1,"SDHCI: TEST2 SDMA - read first sector\n"
-        call    TEST_SDMA_R_MUL
+        mov     ebx, [esi + SDHCI_CONTROLLER.divider25MHz]
+        call    set_SD_clock
+
+        ; set timeout reg
+        mov     byte[eax + 0x2E], 1110b ; set max
+
+        ;DEBUGF  1,"SDHCI: TEST1 SDMA - read first sector\n"
+        ;call    TEST_SDMA_R
+
+        ;DEBUGF  1,"SDHCI: TEST2 SDMA - read first sector\n"
+        ;call    TEST_SDMA_R_MUL
 
         ; Инициализация карты завершена. Изменение настроек интерфейса
         ; set 4bit mode else card and controler suppoted it mode.
@@ -1039,11 +626,19 @@ proc card_init
         ; set new clock. до 50 МГц
 
 
+        ; set interrupt TODO: Сделать нормально!!!
+        or      dword[eax + SDHC_INT_MASK], 0xFFFFFFFF
+        or      dword[eax + SDHC_SOG_MASK], 0xFFFFFFFF
+
 
         ;TODO: get SCR register
 
-        mov     ebx, 2
+        stdcall add_card_disk, sdcard_disk_name
+        mov     [esi + SDHCI_CONTROLLER.type_card], 2
+        DEBUGF  1,'SDHCI: Card init - Memory card\n'
         ret
+
+; SDIO initalization
 .sdio:
         xor     ebx, ebx
         call    get_ocr_mask
@@ -1057,19 +652,31 @@ proc card_init
 
         call    SEND_RCA
 
-        mov     ebx, 1
+        mov     [esi + SDHCI_CONTROLLER.type_card], 1 ; sdio card
+        DEBUGF  1,'SDHCI: Card init - SDIO card\n'
+        DEBUGF  1,'SDHCI: SDIO card not supported. Power and clock stoped\n'
+        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
+        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
+
         ret
 
+
+; MMC initalization
 .mmc:
         ;определяем и настраиваем карту и контроллер
         ;cmd1
         ;TODO: НАЙТИ АЛГОРИТМ ИНИЦИАЛИЗАЦИИ MMC КАРТ!!!
-        mov     ebx, 4
-        xor     ebx, ebx ;DELETE
+        ;call    add_card_disk
+        mov     [esi + SDHCI_CONTROLLER.type_card], 4
+        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
+        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
+
+        DEBUGF  1,'SDHCI: Card not init\n'
         ret
 .err:
+        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
+        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
         DEBUGF  1,'SDHCI: ERROR INIT CARD\n'
-        xor     ebx, ebx
         ret
 endp
 
@@ -1083,43 +690,12 @@ proc thread_card_detect
         mov     eax, dword[edi + 4] ; reg map
         mov     esi, dword[edi + 8] ;controller struct
 
-        call    card_detect
+        call    card_init
         ; destryct thread
         mov     eax, -1
         int     0x40
 endp
 
-proc card_detect
-        DEBUGF  1,'SDHCI: Card inserted\n'
-        call    card_init                 ; TODO: get SRC registers + get SSR register
-        mov     [esi + SDHCI_CONTROLLER.type_card], ebx
-        test    ebx, ebx
-        jz      .unknowe
-        dec     ebx
-        jz      .SDIO
-        ; Если это карта памяти(SD memory, eMMC, SPI), то добавляем диск, else set flag SDIO device
-        ; сохраняем все настройки и состояния процедур
-.memory_card:
-
-
-
-        ;call    add_card_disk
-        DEBUGF  1,'SDHCI: Card init - Memory card\n'
-        ret
-.SDIO:
-        ;mov     [esi + SDHCI_CONTROLLER.type_card], 1 ; sdio card
-        DEBUGF  1,'SDHCI: Card init - SDIO card\n'
-        DEBUGF  1,'SDHCI: SDIO card not supported. Power and clock stoped\n'
-        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
-        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
-        ret
-.unknowe:
-        and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
-        and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
-
-        DEBUGF  1,'SDHCI: Card not init\n'
-        ret
-endp
 
 proc card_destruct
         DEBUGF  1,'SDHCI: Card removed\n'
@@ -1144,17 +720,19 @@ endp
 proc sdhc_irq
         pusha
         mov     esi, [esp + 4 + 32] ;stdcall
-        ;DEBUGF  1,"SDHCI: get_irq \n"
         mov     eax,[esi + SDHCI_CONTROLLER.base_reg_map]
-        DEBUGF  1,"SDHCI: INTRPT: %x \n", [eax + SLOT_INTRPT]
+        ;DEBUGF  1,"SDHCI: INTRPT: %x \n", [eax + SLOT_INTRPT]
         DEBUGF  1,"SLOT_INT_STATUS: %x \n",[eax + SDHC_INT_STATUS]
         cmp    dword[eax + SDHC_INT_STATUS], 0
         jz      .fail
 
-        test    dword[eax + SDHC_INT_STATUS], 0x40
+        mov     ecx, [eax + SDHC_INT_STATUS]
+        mov     dword[esi + SDHCI_CONTROLLER.int_status], ecx
+        mov     [eax + SDHC_INT_STATUS], ecx ; гасим прерывания
+
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.CARD_INS
         jz      .no_card_inserted
 
-        or      dword[eax + SDHC_INT_STATUS], 0x40
         ; create thread for init card
         push     esi
         push     eax
@@ -1178,22 +756,12 @@ proc sdhc_irq
         ;DEBUGF  1,"SDHCI: Evend sended, eax=%x uid=%x \n", eax, ebx
         pop     eax
         pop     esi
-        jmp     .exit
 
 .no_card_inserted:
-        test    dword[eax + SDHC_INT_STATUS], 0x80
-        jz      .no_card_removed
+        test    dword[esi + SDHCI_CONTROLLER.int_status], INT_STATUS.CARD_REM
+        jz      .exit
 
-        or      dword[eax + SDHC_INT_STATUS], 0x80
         call    card_destruct
-        jmp     .exit
-
-.no_card_removed:
-
-
-        mov     ecx, [eax + SDHC_INT_STATUS]
-        mov     dword[esi + SDHCI_CONTROLLER.int_status], ecx
-        mov     [eax + SDHC_INT_STATUS], ecx ; гасим прерывания
 .exit:
         popa
         xor     eax, eax
@@ -1249,13 +817,13 @@ proc  TEST_SDMA_R
         cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
         hlt
         jz      @b
-        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
 .wait_int:
         mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
         hlt
         cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
         jz      .wait_int
-        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
         pop     ebp
         test    dword[eax + SDHC_RESP1_0], 0x8000
         jnz     @f
@@ -1298,7 +866,7 @@ proc  TEST_SDMA_R_MUL
         cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
         hlt
         jz      @b
-        DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
 .wait_int:
         mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
         hlt
@@ -1349,14 +917,13 @@ proc service_proc stdcall, ioctl:dword
         ; 0 - get version
         ; 1 - get card count
         ; 2 - get card (hand + info(CID, CSD, RCA, OCR))
-        ; 3 - set card width
+        ; 3 - set card width bus
         ; 4 - set card clock
-        ; 5 - set DMA mode
-        ; 6 - set card irq hand (for SDIO)
-        ; 7 - look access card
-        ; 8 - unlook access card
-        ; 9 - call card func (for SDIO)
-        ; 10 - capturing control controller
+        ; 5 - set card irq hand (for SDIO)
+        ; 6 - look access card
+        ; 7 - unlook access card
+        ; 8 - call card func (for SDIO)
+        ; 9 - capturing control controller
         ret
 endp
 
