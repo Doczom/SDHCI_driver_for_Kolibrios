@@ -47,7 +47,7 @@
 ;0-11 Transfer Block Size
 ; Этот регистр определяет размер блока передачи данных для CMD17, CMD18, CMD24, CMD25, CMD35.
 ; можно задать значение от 1 до 2048 байт. не изменять и не читать во время транзакции
-; In case of memory? it shall be set up to 512 bytes( Reffer to Implementation Note in Section 1.7.2)
+; In case of memory it shall be set up to 512 bytes( Reffer to Implementation Note in Section 1.7.2)
 ;12-14 SDMA Buffer Boundary
 ; Размер выделяемой нами физической памяти для SDMA команд.(4кб 8 кб 16 кб и тд. до 512к)
 ; когда контроллер дошёл до конца выделенной нами памяти, вызывается прерывание DMA interrupt
@@ -650,3 +650,124 @@
 ;Для обнаружения ошибка таймаута на DAT линии. Установку этого значения делать при любой sd
 ;транзакцией.
 
+
+
+
+;; CODE FOR TEST WORKING
+        ;DEBUGF  1,"SDHCI: TEST1 SDMA - read first sector\n"
+        ;call    TEST_SDMA_R
+
+        ;DEBUGF  1,"SDHCI: TEST2 SDMA - read first sector\n"
+        ;call    TEST_SDMA_R_MUL
+
+;proc  TEST_SDMA_R
+;        or      dword[eax + SDHC_INT_MASK], 0xFFFFFFFF
+;        or      dword[eax + SDHC_SOG_MASK], 0xFFFFFFFF
+;        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+;        mov     byte[eax + 0x2E], 1110b ; set max
+;        mov     ebp, eax
+;        invoke  KernelAlloc, 4096
+;        push    eax
+;        invoke  GetPhysAddr ; arg = eax
+;        xchg    eax, ebp
+;        mov     dword[eax], ebp;phys addr
+;        mov     dword[eax + 4], SD_BLOCK_SIZE
+;        ;(block_count shl) 16  + (sdma_buffer_boundary shl 12) + block_size
+;        mov     dword[eax + 8], 0 ; arg - num sector
+;        mov     dword[eax + 0xC], (((17 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + 010001b
+;@@:
+;        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+;        hlt
+;        jz      @b
+;        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+;.wait_int:
+;        mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
+;        hlt
+;        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+;        jz      .wait_int
+;        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+;        pop     ebp
+;        test    dword[eax + SDHC_RESP1_0], 0x8000
+;        jnz     @f
+;        push    eax
+;        mov     dword[.ptr], ebp
+;        mov     ebx, .file_struct
+;        invoke  FS_Service
+;        pop     eax
+;@@:
+;        ret
+;.file_struct:
+;        dd 2
+;        dd 0
+;        dd 0
+;        dd 512
+;.ptr:   dd 0
+;        db '/tmp0/1/dump_first_sector',0
+;
+;endp
+
+;   Заметка к SDMA: Прерывание DMA возникает только при пересечении границы блока данных
+; у меня это граница в 4кб
+;proc  TEST_SDMA_R_MUL
+;        or      dword[eax + SDHC_INT_MASK], 0xFFFFFFFF
+;        or      dword[eax + SDHC_SOG_MASK], 0xFFFFFFFF
+;        and     dword[eax + SDHC_CTRL1], not 11000b ; set SDMA mode
+;        mov     byte[eax + 0x2E], 1110b ; set max
+;        mov     ebp, eax
+;        invoke  KernelAlloc, 4096*0x800;128;4096*512
+;        push    eax
+;        push    eax
+;        invoke  GetPhysAddr ; arg = eax
+;        xchg    eax, ebp
+;        mov     dword[eax], ebp;phys addr
+;        mov     dword[eax + 4], ((8*0x800) shl 16) +  SD_BLOCK_SIZE
+;        ;(block_count shl) 16  + (sdma_buffer_boundary shl 12) + block_size
+;        mov     dword[eax + 8], 0;0x2000 ; arg - num sector
+;        mov     dword[eax + 0xC], (((18 shl 8) + DATA_PRSNT + RESP_TYPE.R1 ) shl 16) + CMD_TYPE.Multiple + 10101b
+;@@:
+;        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+;        hlt
+;        jz      @b
+;        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+;.wait_int:
+;        mov     dword[esi + SDHCI_CONTROLLER.int_status], 0
+;        hlt
+;        cmp     dword[esi + SDHCI_CONTROLLER.int_status], 0
+;        jz      .wait_int
+;        test    dword[esi + SDHCI_CONTROLLER.int_status], 10b
+;        jnz     @f
+;        test    dword[esi + SDHCI_CONTROLLER.int_status], 1000b
+;        jz      @f
+;
+;        xchg    eax, ebp
+;        mov     eax, dword[esp]
+;        add     eax, 4096
+;        mov     dword[esp], eax
+;        invoke  GetPhysAddr
+;        xchg    eax, ebp
+;        mov     dword[eax], ebp;phys addr
+;
+;        jmp     .wait_int
+;
+;        ;DEBUGF  1,"SDHCI: resp1=%x resp2=%x \n", [eax + SDHC_RESP1_0], [eax + SDHC_RESP3_2]
+;@@:
+;        pop     ebp
+;        pop     ebp
+;        test    dword[eax + SDHC_RESP1_0], 0x8000
+;        jnz     @f
+;        push    eax
+;        mov     dword[.ptr], ebp
+;        mov     ebx, .file_struct
+;        invoke  FS_Service
+;        pop     eax
+;@@:
+;        ret
+;.file_struct:
+;        dd 2
+;        dd 0
+;        dd 0
+;        dd 4096*0x800;128
+;.ptr:   dd 0
+;        db '/tmp0/1/dump_first_sector_mul',0
+;
+;endp
