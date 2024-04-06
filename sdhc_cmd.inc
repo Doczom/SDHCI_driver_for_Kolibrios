@@ -1,4 +1,4 @@
-;;      Copyright (C) 2022, Michael Frolov(aka Doczom)
+;;      Copyright (C) 2022-2024, Mikhail Frolov aka Doczom
 ;; SDHC commands
 
 RESP_TYPE:
@@ -441,6 +441,7 @@ proc    READ_MULTIPLE_BLOCK
         ret
 endp
 
+;-----------------------------------------------------------------------------
 ; block write
 
 ;cmd24 -
@@ -496,6 +497,7 @@ proc    LOCK_UNLOCK
         ret
 endp
 
+;-----------------------------------------------------------------------------
 
 ; SDIO mode
 ; Отличия от SD memory:

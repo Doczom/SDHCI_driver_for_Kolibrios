@@ -1,4 +1,4 @@
-;;      Copyright (C) 2022, Michael Frolov(aka Doczom)
+;;      Copyright (C) 2022-2024, Mikhail Frolov aka Doczom
 ;; SDIO subsystem SDHCI driver. Base functons for working.
 
 

@@ -1,4 +1,4 @@
-;;      Copyright (C) 2022-2023, Michael Frolov aka Doczom
+;;      Copyright (C) 2022-2024, Mikhail Frolov aka Doczom
 ;; SD host controller driver.
 ;;
 ;;                 !!!!WARNING!!!!
@@ -23,7 +23,7 @@
 ;; - add ADMA2
 ;; - add SDUC support
 
-format PE native
+format PE native 0.05
 entry START
 use32
 
@@ -258,14 +258,6 @@ struct  SDHCI_SLOT
 
 ends
 
-;struct  SDHCI_SLOT
-;        reg_map         rd 1; pointer to register map
-;        Capabilities    rd 2 ; qword - save Capabilities
-;        divider400KHz   rd 1 ; for SDCLK frequency Select
-;        divider25MHz    rd 1
-;        divider50MHz    rd 1
-;        max_slot_amper  rd 2
-;ends;
 count_controller:       dd 0
 list_controllers:
 .next:       dd list_controllers ; pointer to first item list
@@ -403,8 +395,6 @@ proc sdhci_init
         and     edx, 111b
         shr     eax, 4
         and     eax, 111b
-        ;cmp     edx, 5 ; check bar, if bar > 5
-        ;ja      .err_first_bar
         mov     ecx, edx
         add     ecx, eax
         cmp     ecx, 5
@@ -523,6 +513,7 @@ endp
 ;     eax - ptr base reg map
 ; out: eax - error code 0 - good; other - init error code
 proc sdhci_slot_init
+        mov     [esi + SDHCI_SLOT.type_card], 0
         ; save registers Capabiliti and  Max Current Capabilities
         mov     ebx, [eax + SDHC_CAPABILITY]
         mov     [esi + SDHCI_SLOT.Capabilities], ebx
@@ -543,7 +534,7 @@ proc sdhci_slot_init
         and     eax, 11111111b  ; 1111 1111
         mov     ebx, 25
         xor     edx, edx
-        div     ebx ; 25 мгц
+        div     ebx ; 25 Mhz
         bsr     ecx, eax
         xor     edx, edx
         bsf     edx, eax
@@ -813,6 +804,7 @@ proc card_init
 
         call    SEND_RCA
 
+        call    SELECT_CARD
         ; get CCCR data (SD, SDIO, CCCR version)
         ;  set 4bit mode
         ;  set hidn speed
@@ -841,6 +833,7 @@ proc card_init
         DEBUGF  1,'SDHCI: Card init - SDIO card\n'
         ret
 .sdio_end_find:
+        mov     eax, [esi + SDHCI_SLOT.base_reg_map]
         DEBUGF  1,'SDHCI: SDIO card not supported. Power and clock stoped\n'
         and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
         and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
@@ -948,6 +941,7 @@ proc card_destruct
 .no_sdio:
         ;TODO: очищаем все регистры связанные с этим слотом
         mov     [esi + SDHCI_SLOT.disk_hand], 0
+        mov     [esi + SDHCI_SLOT.type_card], 0
         ;stop power and clock gen
         and     dword[eax + SDHC_CTRL1], not 0x0100  ; stop power
         and     dword[eax + SDHC_CTRL2], not 0x04  ; stop SD clock
@@ -1126,7 +1120,7 @@ proc service_proc stdcall, ioctl:dword
         jz      @f
 
         cmp     dword[eax + IOCTL.out_size], sizeof.SDHCI_DEVICE
-        jnz     .err_exit
+        jb     .err_exit
 
         mov     ecx, sizeof.SDHCI_DEVICE
         rep movsb
@@ -1134,7 +1128,7 @@ proc service_proc stdcall, ioctl:dword
         jmp     .exit
   @@:
         cmp     dword[eax + IOCTL.out_size], 8 ; for 2 ptr on root list
-        jnz     .err_exit
+        jb      .err_exit
 
         movsd
         movsd
