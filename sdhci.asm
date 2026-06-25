@@ -1,4 +1,4 @@
-;;      Copyright (C) 2022-2024, Mikhail Frolov aka Doczom
+;;      Copyright (C) 2022-2026, Mikhail Frolov aka Doczom
 ;; SD host controller driver.
 ;;
 ;;                 !!!!WARNING!!!!
@@ -300,7 +300,7 @@ proc START c, state:dword, cmdline:dword
         pop     ebp edi esi ebx
         ret
 .not_found:
-        DEBUGF  1,"SDHCI: Contriller not found\n"
+        DEBUGF  1,"SDHCI: Controller not found\n"
         mov     eax, 0
         pop     ebp edi esi ebx
         ret
@@ -366,6 +366,7 @@ proc sdhci_init
         popa
         ;  get DMA support in pci reg
         invoke  PciRead8, [esi + SDHCI_DEVICE.bus], [esi + SDHCI_DEVICE.dev], dword 9
+        DEBUGF  1,"SDHCI: PCI.DMA_SUPPORT = 0x%x \n", eax
         mov     byte[esi + SDHCI_DEVICE.dma_support], al
         cmp     al, PCI_SDHCI_VEND_IF
         ja      .err_interface
@@ -389,8 +390,8 @@ proc sdhci_init
 
 
         ;get count slot
-
         invoke  PciRead8, [esi + SDHCI_DEVICE.bus], dword[esi + SDHCI_DEVICE.dev], PCI_slot_information
+        DEBUGF  1,"SDHCI: PCI.slot_info = 0x%x \n", eax
         movzx   edx, al
         and     edx, 111b
         shr     eax, 4
@@ -402,14 +403,14 @@ proc sdhci_init
         push    edx ; save first BAR  ;save offset base register sdhc
         push    eax ;save count    ;save count working basical addres register
 
-        DEBUGF  1,"SDHCI: base BAR: %x count BAR: %x\n", eax, edx
+        DEBUGF  1,"SDHCI: base BAR: %x count BAR: %x\n", edx, eax
 
         xor     ecx, ecx
 .add_new_slot:
         push    ecx
         ;  get BAR addr to slots(all slots)
         add     ecx, [esp + 4 + 4]
-        add     ecx, PCI_BAR0
+        lea     ecx, [ecx*4 + PCI_BAR0]
         invoke  PciRead32, dword [esi + SDHCI_DEVICE.bus], dword [esi + SDHCI_DEVICE.dev], ecx
         and     al, not 0Fh   ;Ш not 0xff
         ;  check BAR
@@ -421,7 +422,7 @@ proc sdhci_init
         test    eax, eax
         jz      .no_mmio
 
-        DEBUGF  1,"SDHCI: base address = %x \n", eax
+        DEBUGF  1,"SDHCI: base address = 0x%x \n", eax
         push    eax
         ;  alloc memory for structure SDHCI_SLOT
         invoke  KernelAlloc, sizeof.SDHCI_SLOT
@@ -445,9 +446,8 @@ proc sdhci_init
         add     byte[eax + SDHCI_SLOT.disk_name + 8], dl ; set slot in name
 
         ;  copy dma_support in SDHCI_SLOT
-
         mov     edx, [esi + SDHCI_DEVICE.dma_support]
-        mov     [esi + SDHCI_SLOT.dma_support], dl
+        mov     [eax + SDHCI_SLOT.dma_support], dl
 
         ;  ALL RESET slots(all slots)
         mov     edx, [eax + SDHCI_SLOT.base_reg_map]
@@ -461,6 +461,7 @@ proc sdhci_init
         inc     ecx
         cmp     ecx, dword[esp]
         ja      .end_reset
+        jmp     .add_new_slot
 .not_memory: ; TODO не тут, это должно полностью прекращать работу драйвера
 .no_mmio:
         pop     ecx
@@ -490,7 +491,8 @@ proc sdhci_init
         jz      @f
         ; IF NOT sdhci_slot_init() THEN free memory for SDHCI_SLOT
         ;     TODO: free mapio and free slotX in SDHCI_DEVICE
-@@:     ;DEBUGF  1,"SDHCI_SLOT_INIT: error code =%d \n", eax
+        DEBUGF  1,"SDHCI_SLOT_INIT: error code =%d \n", eax
+@@:
         popa
 .skip_slot:
         inc     ecx
@@ -529,37 +531,60 @@ proc sdhci_slot_init
 
         ; get the values of frequency dividers
         push    eax
-        mov     eax, [esi + SDHCI_SLOT.Capabilities]
-        shr     eax, 8
-        and     eax, 11111111b  ; 1111 1111
+        movzx   eax, byte[esi + SDHCI_SLOT.Capabilities + 1]
+
+        test    eax, eax
+        jz      .err_base_clock
+
         mov     ebx, 25
+
         xor     edx, edx
         div     ebx ; 25 Mhz
-        bsr     ecx, eax
-        xor     edx, edx
-        bsf     edx, eax
-        cmp     ecx, edx
-        jnz     @f
-        dec     ecx
-@@:
-        xor     edi, edi
-        bts     edi, ecx
-        mov     dword[esi + SDHCI_SLOT.divider25MHz], edi
-        DEBUGF  1,'25MHz : %u\n', edi
-        shr     edi, 1   ; +- дес€ть
-        mov     dword[esi + SDHCI_SLOT.divider50MHz], edi
-        DEBUGF  1,'50MHz : %u\n', edi
-        imul    eax, 63  ; примерно
+
+        cmp     edx, 1
+        cmc
+        adc     eax, 0
 
         bsr     ecx, eax
         xor     edx, edx
         bsf     edx, eax
-        cmp    ecx, edx
-        jnz     @f
-        dec     ecx
+        cmp     ecx, edx
+        je      @f
+        inc     ecx
 @@:
         xor     edi, edi
         bts     edi, ecx
+        shr     edi, 1
+
+        mov     dword[esi + SDHCI_SLOT.divider25MHz], edi
+        DEBUGF  1,'25MHz : %u\n', edi
+        shr     edi, 1
+        mov     dword[esi + SDHCI_SLOT.divider50MHz], edi
+        DEBUGF  1,'50MHz : %u\n', edi
+
+        movzx   eax, byte[esi + SDHCI_SLOT.Capabilities + 1]
+
+        lea     eax, [eax*4 + eax]
+        shl     eax, 1
+        mov     ebx, 4 ; const for 400kHz
+
+        xor     edx, edx
+        div     ebx
+
+        cmp     edx, 1
+        cmc
+        adc     eax, 0
+
+        bsr     ecx, eax
+        xor     edx, edx
+        bsf     edx, eax
+        cmp     ecx, edx
+        je      @f
+        inc     ecx
+@@:
+        xor     edi, edi
+        bts     edi, ecx
+        shr     edi, 1
         mov     dword[esi + SDHCI_SLOT.divider400KHz], edi
         DEBUGF  1,'400KHz : %u\n', edi
 
@@ -596,6 +621,7 @@ proc sdhci_slot_init
 
         ; detected card in slot
         ;mov     eax, [esi + SDHCI_CONTROLLER.base_reg_map]
+        DEBUGF  1,'SDHCI: SDHC_PRSNT_STATE= 0x%x \n',[eax + SDHC_PRSNT_STATE]
         test    dword[eax + SDHC_PRSNT_STATE], 0x10000 ; check 16 bit in SDHC_PRSNT_STATE.CARD_INS
         jz      @f
 
@@ -604,6 +630,8 @@ proc sdhci_slot_init
 
         xor     eax, eax
         ret
+.err_base_clock:
+        pop     eax
 .fail:
         DEBUGF  1,"SDHC_INIT: RUNTIME ERROR"
         mov     eax, 1
@@ -640,6 +668,7 @@ endp
 
 proc card_init
         DEBUGF  1,'SDHCI: Card inserted\n'
+        DEBUGF  1,'SDHCI: SDHC_PRSNT_STATE= 0x%x \n',[eax + SDHC_PRSNT_STATE]
         and     dword[esi + SDHCI_SLOT.card_reg_rca], 0
         and     dword[esi + SDHCI_SLOT.disk_hand], 0
         and     dword[esi + SDHCI_SLOT.sdio_service], 0
@@ -1027,8 +1056,8 @@ proc sdhc_irq c pdata:dword
 
         push    eax
 
-        push    [eax + SDHCI_SLOT.sdio_pdata]
-        mov     ecx, [eax + SDHCI_SLOT.sdio_service]
+        push    [esi + SDHCI_SLOT.sdio_pdata]
+        mov     ecx, [esi + SDHCI_SLOT.sdio_service]
         mov     ecx, [ecx + SDIO_SERVICE.sdio_func]
         call    dword[ecx + SDIO_SERVICE_FUNC.int_handler]
 
